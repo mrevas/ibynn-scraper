@@ -48,6 +48,11 @@ web_modules/
 # TypeScript cache
 *.tsbuildinfo
 
+# Scraper results
+results/
+results_*.json
+.env
+
 # Optional npm cache directory
 .npm
 

@@ -1,0 +1,26 @@
+{
+  "name": "ibynn-target-scraper",
+  "version": "1.0.0",
+  "description": "A web scraper for Target search results",
+  "main": "src/scraper.js",
+  "scripts": {
+    "start": "node src/cli.js",
+    "scrape": "node src/cli.js",
+    "test": "node examples/test.js",
+    "advanced": "node examples/advanced.js",
+    "batch": "node examples/batch.js",
+    "debug": "node debug.js"
+  },
+  "keywords": [
+    "scraper",
+    "target",
+    "web-scraping"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "puppeteer": "^24.15.1",
+    "cheerio": "^1.0.0-rc.12"
+  },
+  "devDependencies": {}
+}
