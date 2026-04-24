@@ -16,7 +16,7 @@ class TargetScraper extends BaseScraper {
   async init() {
     try {
       this.browser = await puppeteer.launch({
-        headless: false,//this.headless,
+        headless: this.headless,
         args: ['--no-sandbox', '--disable-setuid-sandbox']
       });
       console.log('[✓] Browser initialized');
