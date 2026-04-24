@@ -10,15 +10,15 @@ async function main() {
   const args = process.argv.slice(2);
   const query = args[0] || 'laptop';
   const limit = parseInt(args[1] || config.search.limit);
+  const pages = parseInt(args[2] || 1);
 
   if (!query) {
     console.log(`
-Usage: npm run scrape -- <search-term> [limit]
+Usage: npm run scrape -- <search-term> [limit] [pages]
 
 Examples:
-  npm run scrape -- "gaming laptop" 30
-  npm run scrape -- "wireless headphones" 50
-  npm run scrape -- "shoes"
+  npm run scrape -- "apples" 30
+  npm run scrape -- "apples" 50 3
     `);
     process.exit(0);
   }
@@ -27,23 +27,23 @@ Examples:
 
   try {
     await scraper.init();
-    
+
     console.log('\n🔍 Starting Target Search Scraper\n');
     console.log(`Store: Target`);
     console.log(`Search term: "${query}"`);
-    console.log(`Max results: ${limit}\n`);
+    console.log(`Max results: ${limit} across ${pages} page(s)\n`);
 
-    const products = await scraper.search(query, { limit });
+    const products = await scraper.search(query, { limit, pages });
 
     console.log('\n📦 Results:\n');
     console.log('─'.repeat(100));
 
-    products.forEach((product, index) => {
-      console.log(`\n${index + 1}. ${product.name}`);
-      console.log(`   Price: ${product.price}`);
-      console.log(`   Rating: ${product.rating}`);
-      console.log(`   URL: ${product.url}`);
-      console.log(`   ID: ${product.productId}`);
+    products.forEach((product) => {
+      console.log(`\n${product.position}. ${product.title}`);
+      console.log(`   Price: ${product.price ?? 'N/A'}`);
+      console.log(`   Rating: ${product.rating ?? 'N/A'}`);
+      console.log(`   URL: ${product.product_link}`);
+      console.log(`   ID: ${product.product_id}`);
     });
 
     console.log('\n' + '─'.repeat(100));

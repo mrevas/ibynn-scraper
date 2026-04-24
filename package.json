@@ -3,6 +3,13 @@
   "version": "1.0.0",
   "description": "A web scraper for Target search results",
   "main": "src/scraper.js",
+  "bin": {
+    "ibynn-scrape": "src/cli.js"
+  },
+  "files": [
+    "src/",
+    "config.js"
+  ],
   "scripts": {
     "start": "node src/cli.js",
     "scrape": "node src/cli.js",
@@ -14,10 +21,14 @@
   "keywords": [
     "scraper",
     "target",
-    "web-scraping"
+    "web-scraping",
+    "puppeteer"
   ],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=16.0.0"
+  },
   "dependencies": {
     "puppeteer": "^24.15.1",
     "cheerio": "^1.0.0-rc.12"

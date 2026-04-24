@@ -16,7 +16,7 @@ class TargetScraper extends BaseScraper {
   async init() {
     try {
       this.browser = await puppeteer.launch({
-        headless: this.headless,
+        headless: false,//this.headless,
         args: ['--no-sandbox', '--disable-setuid-sandbox']
       });
       console.log('[✓] Browser initialized');
@@ -43,145 +43,168 @@ class TargetScraper extends BaseScraper {
    * @returns {array} Array of product objects
    */
   async search(query, options = {}) {
-    const { limit = 30, sort = 'relevance' } = options;
+    const { limit = 30, pages = 1 } = options;
+    const RESULTS_PER_PAGE = 24;
 
     if (!this.browser) {
       await this.init();
     }
 
-    let page;
-    try {
-      page = await this.browser.newPage();
-      
-      // Set viewport and user agent
-      await page.setViewport({ width: 1280, height: 720 });
-      await page.setUserAgent(
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      );
+    const allRaw = [];
+    const seenUrls = new Set();
 
-      // Navigate to Target search
-      const searchUrl = `https://www.target.com/s?searchTerm=${encodeURIComponent(query)}`;
-      console.log(`[→] Searching for: "${query}"`);
-      
-      await page.goto(searchUrl, { waitUntil: 'networkidle2', timeout: this.timeout });
+    for (let pageNum = 1; pageNum <= pages; pageNum++) {
+      const offset = (pageNum - 1) * RESULTS_PER_PAGE;
+      const searchUrl = `https://www.target.com/s?searchTerm=${encodeURIComponent(query)}${offset > 0 ? `&Nao=${offset}` : ''}`;
+      console.log(`[→] Page ${pageNum}/${pages}: ${searchUrl}`);
 
-      // Wait for product links to load
+      let tab;
       try {
-        await page.waitForSelector('a[href*="/p/"]', { timeout: 10000 });
-      } catch (e) {
-        console.log('[⚠] No products found on page');
-      }
+        tab = await this.browser.newPage();
+        await tab.setViewport({ width: 1280, height: 720 });
+        await tab.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+        await tab.goto(searchUrl, { waitUntil: 'networkidle2', timeout: this.timeout });
 
-      // Extract product data from links
-      const products = await page.evaluate(() => {
-        const items = [];
-        const links = document.querySelectorAll('a[href*="/p/"]');
+        if (pageNum === 1) {
+          console.log('[⏸] Pausing — check the browser...');
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
 
-        // Group links by parent container to avoid duplicates
-        const seenUrls = new Set();
+        try {
+          await tab.waitForSelector('a[href*="/p/"]', { timeout: 10000 });
+        } catch (e) {
+          console.log(`[⚠] No products found on page ${pageNum}`);
+        }
 
-        links.forEach((link) => {
-          try {
-            const url = link.href;
-            
-            // Skip duplicates
-            if (seenUrls.has(url)) return;
-            seenUrls.add(url);
+        const pageRaw = await tab.evaluate(() => {
+          const items = [];
+          const links = document.querySelectorAll('a[href*="/p/"]');
 
-            // Get product ID from URL - extract the actual product ID
-            const idMatch = url.match(/\/A-(\d+)/);
-            const productId = idMatch ? idMatch[1] : url.match(/\/p\/([^/?-]+)/)?.[1] || 'N/A';
+          links.forEach((link) => {
+            try {
+              const url = link.href;
 
-            let name = 'N/A';
-            
-            // Extract product name from URL slug (most reliable method)
-            const slug = url.split('/p/')[1]?.split('/')[0];
-            if (slug) {
-              // Clean up the slug: replace hyphens with spaces and capitalize
-              name = slug
-                .split('-')
-                .filter(word => word.length > 1 || /\d/.test(word)) // Filter out single letters
-                .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-                .join(' ')
-                .substring(0, 200);
-            }
-            
-            // Fallback: try to find from DOM elements
-            if (!name || name.length < 3) {
-              let container = link.closest('div');
-              if (container) {
-                // Look for h3, h2, or any heading
-                const heading = container.querySelector('h3, h2, h1');
-                if (heading?.innerText?.trim()?.length > 3) {
-                  name = heading.innerText.trim();
+              // Skip recommendation carousels and mini cards (e.g. "Deals" carousel)
+              // but keep "More Results" grid links which are plain product cards
+              if (link.closest('[data-test="recommended-products-carousel"]') ||
+                  link.closest('[data-test="productCardVariantMini"]')) return;
+
+              const idMatch = url.match(/\/A-(\d+)/);
+              const productId = idMatch ? idMatch[1] : url.match(/\/p\/([^/?-]+)/)?.[1] || 'N/A';
+
+              // Name from URL slug
+              let name = 'N/A';
+              const slug = url.split('/p/')[1]?.split('/')[0];
+              if (slug) {
+                name = slug
+                  .split('-')
+                  .filter(word => word.length > 1 || /\d/.test(word))
+                  .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                  .join(' ')
+                  .substring(0, 200);
+              }
+              if (!name || name.length < 3) {
+                name = link.title?.trim() || link.getAttribute('aria-label')?.trim() || 'N/A';
+              }
+              name = (name || 'N/A').substring(0, 250).trim();
+
+              // Card container
+              let container = link.closest('li') || link.closest('article');
+              if (!container) {
+                let el = link.parentElement;
+                for (let i = 0; i < 10; i++) {
+                  if (!el) break;
+                  if (el.tagName === 'LI' || (el.offsetHeight > 150 && el.offsetWidth > 100)) {
+                    container = el;
+                    break;
+                  }
+                  el = el.parentElement;
                 }
               }
-              
-              // Last resort: use link title
-              if (!name && link.title?.trim()?.length > 3) {
-                name = link.title.trim();
+
+              // Price via Target's predictable id="product-card-price-{productId}"
+              let price = null;
+              let extractedPrice = null;
+              const priceWrapper = document.getElementById(`product-card-price-${productId}`);
+              const priceEl = priceWrapper?.querySelector('[data-test="current-price"]');
+              const priceText = priceEl?.textContent?.trim();
+              if (priceText) {
+                price = priceText;
+                const firstMatch = priceText.match(/\$([\d,]+\.?\d{0,2})/);
+                if (firstMatch) extractedPrice = parseFloat(firstMatch[1].replace(',', ''));
               }
-            }
 
-            // Ensure name is set
-            name = (name || 'N/A').substring(0, 250).trim();
-
-            // Get price from nearby elements in parent container
-            let price = 'N/A';
-            let container = link.closest('div');
-            if (container) {
-              // Look for price pattern
-              const priceText = container.innerText;
-              const priceMatch = priceText?.match(/\$[\d,]+\.?\d{0,2}/);
-              price = priceMatch ? priceMatch[0] : 'N/A';
-            }
-
-            // Get rating from parent container
-            let rating = 'N/A';
-            if (container) {
-              const ratingEl = container.querySelector('[role="img"][aria-label*="star"], [aria-label*="star"], [class*="rating"]');
-              if (ratingEl) {
-                rating = ratingEl.getAttribute('aria-label') || ratingEl.innerText?.trim() || 'N/A';
+              // Rating and review count
+              let rating = null;
+              let reviews = null;
+              if (container) {
+                const ratingEl = container.querySelector(
+                  '[aria-label*="out of"], [aria-label*="star"], [aria-label*="rating"]'
+                );
+                if (ratingEl) {
+                  const label = ratingEl.getAttribute('aria-label') || '';
+                  const rMatch = label.match(/([\d.]+)\s*out of/i) || label.match(/^([\d.]+)/);
+                  const rvMatch = label.match(/([\d,]+)\s*review/i);
+                  if (rMatch) rating = parseFloat(rMatch[1]);
+                  if (rvMatch) reviews = parseInt(rvMatch[1].replace(',', ''));
+                }
               }
-            }
 
-            // Get image
-            let image = 'N/A';
-            if (container) {
-              const imgEl = container.querySelector('img');
-              image = imgEl?.src || imgEl?.dataset?.src || 'N/A';
-            }
+              // Thumbnail
+              let thumbnail = null;
+              if (container) {
+                const imgEl = container.querySelector('img');
+                thumbnail = imgEl?.src || imgEl?.dataset?.src || null;
+              }
 
-            // Only add if we have name and valid URL
-            if (name !== 'N/A' && url) {
-              items.push({
-                name,
-                price,
-                rating,
-                url,
-                image,
-                productId
-              });
+              if (name !== 'N/A' && url) {
+                items.push({ name, price, extractedPrice, rating, reviews, url, thumbnail, productId });
+              }
+            } catch (err) {
+              // skip
             }
-          } catch (err) {
-            // Skip this product
-          }
+          });
+
+          return items;
         });
 
-        return items;
-      });
+        // Cross-page dedup
+        for (const p of pageRaw) {
+          if (!seenUrls.has(p.url)) {
+            seenUrls.add(p.url);
+            allRaw.push(p);
+          }
+        }
 
-      console.log(`[✓] Found ${products.length} products`);
-      return products.slice(0, limit);
-
-    } catch (error) {
-      console.error('[✗] Search error:', error.message);
-      throw error;
-    } finally {
-      if (page) {
-        await page.close();
+        console.log(`[✓] Page ${pageNum}: ${pageRaw.length} products (total so far: ${allRaw.length})`);
+      } catch (error) {
+        console.error(`[✗] Error on page ${pageNum}:`, error.message);
+      } finally {
+        if (tab) await tab.close();
       }
+
+      if (allRaw.length >= limit) break;
     }
+
+    const products = allRaw.slice(0, limit).map((p, i) => ({
+      position: i + 1,
+      title: p.name,
+      product_id: p.productId,
+      product_link: p.url,
+      source: 'Target',
+      source_icon: 'https://www.target.com/favicon.ico',
+      price: p.price,
+      extracted_price: p.extractedPrice,
+      rating: p.rating,
+      reviews: p.reviews,
+      extensions: [],
+      thumbnail: p.thumbnail,
+      primary_offer: p.extractedPrice != null ? { offer_price: p.extractedPrice } : null,
+      seller_name: 'Target'
+    }));
+
+    console.log(`[✓] Done — ${products.length} total products`);
+    return products;
   }
 
   /**

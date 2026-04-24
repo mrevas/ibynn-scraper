@@ -1,16 +1,11 @@
-/**
- * Main Scraper Export
- * 
- * This file provides backward compatibility. 
- * New code should import directly from ./stores/TargetScraper
- * 
- * Structure:
- * - src/stores/BaseScraper.js - Base class for all scrapers
- * - src/stores/TargetScraper.js - Target-specific implementation
- * - src/stores/index.js - Store registry and factory
- */
-
 const TargetScraper = require('./stores/TargetScraper');
+const { getScraper, listStores, STORES } = require('./stores');
 
-// Export for backward compatibility
+// Default export: TargetScraper (for require('ibynn-target-scraper'))
 module.exports = TargetScraper;
+
+// Named exports (for destructured require)
+module.exports.TargetScraper = TargetScraper;
+module.exports.getScraper = getScraper;
+module.exports.listStores = listStores;
+module.exports.STORES = STORES;
