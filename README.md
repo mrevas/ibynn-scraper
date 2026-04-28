@@ -1,6 +1,6 @@
 # Target Search Scraper
 
-A powerful, modular Node.js web scraper for Target.com product searches built with Puppeteer. Designed to be easily extensible for scraping other stores in the future.
+A powerful, modular Node.js web scraper for Target.com product searches built with Playwright. Designed to be easily extensible for scraping other stores in the future.
 
 ## Features
 
@@ -26,6 +26,7 @@ cd ibynn-scraper
 2. Install dependencies:
 ```bash
 npm install
+npx playwright install chromium
 ```
 
 ### Usage
@@ -203,7 +204,7 @@ Sample output structure:
 - Respects Target's terms of service - use responsibly
 - Add delays between requests if scraping large volumes
 - Some data might be "N/A" if the page structure differs
-- Requires Chromium/Chrome browser installed (via Puppeteer)
+- Requires Playwright's Chromium browser (`npx playwright install chromium`)
 
 ## Requirements
 
@@ -212,7 +213,7 @@ Sample output structure:
 
 ## Dependencies
 
-- **puppeteer** - Headless browser automation
+- **playwright** - Headless browser automation
 - **cheerio** - jQuery-like HTML parsing
 
 ## License
@@ -222,4 +223,3 @@ MIT
 ## Disclaimer
 
 This tool is for educational purposes. Always check the website's `robots.txt` and terms of service before scraping.
-

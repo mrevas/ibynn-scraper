@@ -9,6 +9,7 @@ class BaseScraper {
     this.headless = options.headless !== false;
     this.timeout = options.timeout || 30000;
     this.browser = null;
+    this.context = null;
   }
 
   /**

@@ -2,27 +2,29 @@
  * Detailed diagnostic tool to inspect what Target returns
  */
 
-const puppeteer = require('puppeteer');
+const { chromium } = require('playwright');
+const config = require('./config');
 
 async function diagnose(query = 'laptop') {
-  const browser = await puppeteer.launch({ headless: true });
-  const page = await browser.newPage();
+  const browser = await chromium.launch({ headless: true, args: config.browser.args });
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 720 },
+    userAgent: config.userAgent
+  });
+  const page = await context.newPage();
 
   try {
     const searchUrl = `https://www.target.com/s?searchTerm=${encodeURIComponent(query)}`;
-    console.log(`\n🔍 Diagnosing: ${query}`);
-    console.log(`📍 URL: ${searchUrl}\n`);
+    console.log(`\n[?] Diagnosing: ${query}`);
+    console.log(`[i] URL: ${searchUrl}\n`);
 
-    // Navigate
-    console.log('[→] Navigating...');
-    const response = await page.goto(searchUrl, { waitUntil: 'networkidle2' });
-    console.log(`[✓] Response status: ${response?.status()}\n`);
+    console.log('[>] Navigating...');
+    const response = await page.goto(searchUrl, { waitUntil: 'networkidle' });
+    console.log(`[OK] Response status: ${response?.status()}\n`);
 
-    // Wait a bit more for dynamic content
-    console.log('[→] Waiting for dynamic content...');
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    console.log('[>] Waiting for dynamic content...');
+    await new Promise((resolve) => setTimeout(resolve, 2000));
 
-    // Get page information
     const pageInfo = await page.evaluate(() => {
       return {
         title: document.title,
@@ -40,23 +42,23 @@ async function diagnose(query = 'laptop') {
       };
     });
 
-    console.log(`[✓] Page title: ${pageInfo.title}`);
-    console.log(`[✓] Current URL: ${pageInfo.url}`);
-    console.log(`[✓] Has "no results" message: ${pageInfo.hasNoResults}`);
-    console.log(`[✓] Has "results" text: ${pageInfo.hasProducts}\n`);
+    console.log(`[OK] Page title: ${pageInfo.title}`);
+    console.log(`[OK] Current URL: ${pageInfo.url}`);
+    console.log(`[OK] Has "no results" message: ${pageInfo.hasNoResults}`);
+    console.log(`[OK] Has "results" text: ${pageInfo.hasProducts}\n`);
 
-    console.log('📊 Product Elements Found:');
+    console.log('[i] Product Elements Found:');
     for (const [key, count] of Object.entries(pageInfo.productElements)) {
       console.log(`   ${key}: ${count}`);
     }
 
-    console.log('\n📝 Page Content Preview:');
-    console.log('─'.repeat(60));
+    console.log('\n[i] Page Content Preview:');
+    console.log('-'.repeat(60));
     console.log(pageInfo.bodyText);
-    console.log('─'.repeat(60) + '\n');
+    console.log('-'.repeat(60) + '\n');
 
     if (pageInfo.productElements.byHref > 0) {
-      console.log('[✓] Found product links! Extracting sample...\n');
+      console.log('[OK] Found product links. Extracting sample...\n');
 
       const samples = await page.evaluate(() => {
         return Array.from(document.querySelectorAll('a[href*="/p/"]'))
@@ -69,20 +71,18 @@ async function diagnose(query = 'laptop') {
       });
 
       console.log('Sample products:');
-      samples.forEach((s, i) => {
-        console.log(`${i + 1}. ${s.text}`);
-        console.log(`   URL: ${s.href}`);
-        console.log(`   Parent class: ${s.parent}\n`);
+      samples.forEach((sample, index) => {
+        console.log(`${index + 1}. ${sample.text}`);
+        console.log(`   URL: ${sample.href}`);
+        console.log(`   Parent class: ${sample.parent}\n`);
       });
     }
 
-    // Take a screenshot for visual inspection
     const screenshotPath = `debug_${query}_${Date.now()}.png`;
     await page.screenshot({ path: screenshotPath });
-    console.log(`📸 Screenshot saved to: ${screenshotPath}\n`);
-
+    console.log(`[i] Screenshot saved to: ${screenshotPath}\n`);
   } catch (error) {
-    console.error('❌ Error:', error.message);
+    console.error('[X] Error:', error.message);
   } finally {
     await browser.close();
   }

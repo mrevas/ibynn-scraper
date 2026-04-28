@@ -1,5 +1,6 @@
-const puppeteer = require('puppeteer');
+const { chromium } = require('playwright');
 const BaseScraper = require('./BaseScraper');
+const config = require('../../config');
 
 /**
  * Target.com Scraper
@@ -15,13 +16,17 @@ class TargetScraper extends BaseScraper {
    */
   async init() {
     try {
-      this.browser = await puppeteer.launch({
+      this.browser = await chromium.launch({
         headless: this.headless,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+        args: config.browser.args
       });
-      console.log('[✓] Browser initialized');
+      this.context = await this.browser.newContext({
+        viewport: { width: 1280, height: 720 },
+        userAgent: config.userAgent
+      });
+      console.log('[OK] Browser initialized');
     } catch (error) {
-      console.error('[✗] Failed to initialize browser:', error.message);
+      console.error('[X] Failed to initialize browser:', error.message);
       throw error;
     }
   }
@@ -30,10 +35,22 @@ class TargetScraper extends BaseScraper {
    * Close browser
    */
   async close() {
+    if (this.context) {
+      await this.context.close();
+      this.context = null;
+    }
     if (this.browser) {
       await this.browser.close();
-      console.log('[✓] Browser closed');
+      this.browser = null;
+      console.log('[OK] Browser closed');
     }
+  }
+
+  async getPage() {
+    if (!this.browser || !this.context) {
+      await this.init();
+    }
+    return this.context.newPage();
   }
 
   /**
@@ -44,36 +61,29 @@ class TargetScraper extends BaseScraper {
    */
   async search(query, options = {}) {
     const { limit = 30, pages = 1 } = options;
-    const RESULTS_PER_PAGE = 24;
-
-    if (!this.browser) {
-      await this.init();
-    }
-
+    const resultsPerPage = 24;
     const allRaw = [];
     const seenUrls = new Set();
 
     for (let pageNum = 1; pageNum <= pages; pageNum++) {
-      const offset = (pageNum - 1) * RESULTS_PER_PAGE;
+      const offset = (pageNum - 1) * resultsPerPage;
       const searchUrl = `https://www.target.com/s?searchTerm=${encodeURIComponent(query)}${offset > 0 ? `&Nao=${offset}` : ''}`;
-      console.log(`[→] Page ${pageNum}/${pages}: ${searchUrl}`);
+      console.log(`[>] Page ${pageNum}/${pages}: ${searchUrl}`);
 
       let tab;
       try {
-        tab = await this.browser.newPage();
-        await tab.setViewport({ width: 1280, height: 720 });
-        await tab.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-        await tab.goto(searchUrl, { waitUntil: 'networkidle2', timeout: this.timeout });
+        tab = await this.getPage();
+        await tab.goto(searchUrl, { waitUntil: 'networkidle', timeout: this.timeout });
 
         if (pageNum === 1) {
-          console.log('[⏸] Pausing — check the browser...');
-          await new Promise(resolve => setTimeout(resolve, 100));
+          console.log('[..] Pausing briefly for first-page rendering...');
+          await new Promise((resolve) => setTimeout(resolve, 100));
         }
 
         try {
           await tab.waitForSelector('a[href*="/p/"]', { timeout: 10000 });
-        } catch (e) {
-          console.log(`[⚠] No products found on page ${pageNum}`);
+        } catch (error) {
+          console.log(`[!] No products found on page ${pageNum}`);
         }
 
         const pageRaw = await tab.evaluate(() => {
@@ -84,22 +94,23 @@ class TargetScraper extends BaseScraper {
             try {
               const url = link.href;
 
-              // Skip recommendation carousels and mini cards (e.g. "Deals" carousel)
-              // but keep "More Results" grid links which are plain product cards
-              if (link.closest('[data-test="recommended-products-carousel"]') ||
-                  link.closest('[data-test="productCardVariantMini"]')) return;
+              if (
+                link.closest('[data-test="recommended-products-carousel"]') ||
+                link.closest('[data-test="productCardVariantMini"]')
+              ) {
+                return;
+              }
 
               const idMatch = url.match(/\/A-(\d+)/);
               const productId = idMatch ? idMatch[1] : url.match(/\/p\/([^/?-]+)/)?.[1] || 'N/A';
 
-              // Name from URL slug
               let name = 'N/A';
               const slug = url.split('/p/')[1]?.split('/')[0];
               if (slug) {
                 name = slug
                   .split('-')
-                  .filter(word => word.length > 1 || /\d/.test(word))
-                  .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                  .filter((word) => word.length > 1 || /\d/.test(word))
+                  .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
                   .join(' ')
                   .substring(0, 200);
               }
@@ -108,7 +119,6 @@ class TargetScraper extends BaseScraper {
               }
               name = (name || 'N/A').substring(0, 250).trim();
 
-              // Card container
               let container = link.closest('li') || link.closest('article');
               if (!container) {
                 let el = link.parentElement;
@@ -122,7 +132,6 @@ class TargetScraper extends BaseScraper {
                 }
               }
 
-              // Price via Target's predictable id="product-card-price-{productId}"
               let price = null;
               let extractedPrice = null;
               const priceWrapper = document.getElementById(`product-card-price-${productId}`);
@@ -134,7 +143,6 @@ class TargetScraper extends BaseScraper {
                 if (firstMatch) extractedPrice = parseFloat(firstMatch[1].replace(',', ''));
               }
 
-              // Rating and review count
               let rating = null;
               let reviews = null;
               if (container) {
@@ -150,7 +158,6 @@ class TargetScraper extends BaseScraper {
                 }
               }
 
-              // Thumbnail
               let thumbnail = null;
               if (container) {
                 const imgEl = container.querySelector('img');
@@ -160,50 +167,51 @@ class TargetScraper extends BaseScraper {
               if (name !== 'N/A' && url) {
                 items.push({ name, price, extractedPrice, rating, reviews, url, thumbnail, productId });
               }
-            } catch (err) {
-              // skip
+            } catch (error) {
+              // Skip malformed cards.
             }
           });
 
           return items;
         });
 
-        // Cross-page dedup
-        for (const p of pageRaw) {
-          if (!seenUrls.has(p.url)) {
-            seenUrls.add(p.url);
-            allRaw.push(p);
+        for (const product of pageRaw) {
+          if (!seenUrls.has(product.url)) {
+            seenUrls.add(product.url);
+            allRaw.push(product);
           }
         }
 
-        console.log(`[✓] Page ${pageNum}: ${pageRaw.length} products (total so far: ${allRaw.length})`);
+        console.log(`[OK] Page ${pageNum}: ${pageRaw.length} products (total so far: ${allRaw.length})`);
       } catch (error) {
-        console.error(`[✗] Error on page ${pageNum}:`, error.message);
+        console.error(`[X] Error on page ${pageNum}:`, error.message);
       } finally {
-        if (tab) await tab.close();
+        if (tab) {
+          await tab.close();
+        }
       }
 
       if (allRaw.length >= limit) break;
     }
 
-    const products = allRaw.slice(0, limit).map((p, i) => ({
-      position: i + 1,
-      title: p.name,
-      product_id: p.productId,
-      product_link: p.url,
+    const products = allRaw.slice(0, limit).map((product, index) => ({
+      position: index + 1,
+      title: product.name,
+      product_id: product.productId,
+      product_link: product.url,
       source: 'Target',
       source_icon: 'https://www.target.com/favicon.ico',
-      price: p.price,
-      extracted_price: p.extractedPrice,
-      rating: p.rating,
-      reviews: p.reviews,
+      price: product.price,
+      extracted_price: product.extractedPrice,
+      rating: product.rating,
+      reviews: product.reviews,
       extensions: [],
-      thumbnail: p.thumbnail,
-      primary_offer: p.extractedPrice != null ? { offer_price: p.extractedPrice } : null,
+      thumbnail: product.thumbnail,
+      primary_offer: product.extractedPrice != null ? { offer_price: product.extractedPrice } : null,
       seller_name: 'Target'
     }));
 
-    console.log(`[✓] Done — ${products.length} total products`);
+    console.log(`[OK] Done - ${products.length} total products`);
     return products;
   }
 
@@ -213,22 +221,14 @@ class TargetScraper extends BaseScraper {
    * @returns {object} Product details
    */
   async getProductDetails(productId) {
-    if (!this.browser) {
-      await this.init();
-    }
-
     let page;
     try {
-      page = await this.browser.newPage();
-      await page.setViewport({ width: 1280, height: 720 });
-      await page.setUserAgent(
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      );
+      page = await this.getPage();
 
       const url = `https://www.target.com/p/${productId}`;
-      console.log(`[→] Fetching product details for ID: ${productId}`);
+      console.log(`[>] Fetching product details for ID: ${productId}`);
 
-      await page.goto(url, { waitUntil: 'networkidle2', timeout: this.timeout });
+      await page.goto(url, { waitUntil: 'networkidle', timeout: this.timeout });
 
       const details = await page.evaluate(() => {
         const title = document.querySelector('[data-test="@web/ProductTitle"]')?.textContent?.trim() || 'N/A';
@@ -240,11 +240,10 @@ class TargetScraper extends BaseScraper {
         return { title, price, description, rating, reviews };
       });
 
-      console.log('[✓] Product details retrieved');
+      console.log('[OK] Product details retrieved');
       return details;
-
     } catch (error) {
-      console.error('[✗] Failed to get product details:', error.message);
+      console.error('[X] Failed to get product details:', error.message);
       throw error;
     } finally {
       if (page) {
@@ -262,15 +261,12 @@ class TargetScraper extends BaseScraper {
   async searchWithFilters(query, filters = {}, options = {}) {
     const products = await this.search(query, options);
 
-    // Client-side filtering
     return products.filter((product) => {
-      // Rating filter
       if (filters.minRating) {
         const rating = parseFloat(product.rating?.[0] || 0);
         if (rating < filters.minRating) return false;
       }
 
-      // Price filter
       if (filters.priceMin || filters.priceMax) {
         const priceStr = product.price?.replace('$', '').split('-')[0] || '0';
         const price = parseFloat(priceStr);

@@ -16,10 +16,11 @@ cd ibynn-scraper
 
 # Install dependencies
 npm install
+npx playwright install chromium
 ```
 
 This will install:
-- **puppeteer** (~65MB) - Includes headless Chrome
+- **playwright** - Browser automation library
 - **cheerio** - HTML parsing library
 
 ## Quick Start
