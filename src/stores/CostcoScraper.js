@@ -2,6 +2,11 @@ const BaseScraper = require('./BaseScraper');
 const config = require('../../config');
 const { createBrowser, getBrowserProvider } = require('../browser');
 
+const COSTCO_HOME_URL = 'https://www.costco.com/';
+const SEARCH_URLS = [
+  (query) => `https://www.costco.com/CatalogSearch?dept=All&keyword=${encodeURIComponent(query)}`,
+  (query) => `https://www.costco.com/s?keyword=${encodeURIComponent(query)}`
+];
 const SEARCH_LINK_SELECTOR = 'a[href*=".product."]';
 const PRODUCT_TITLE_SELECTOR = 'h1, [data-testid*="product-name"], [class*="product-name"]';
 
@@ -53,75 +58,197 @@ class CostcoScraper extends BaseScraper {
     }
 
     const page = await this.browser.newPage();
-    await page.setViewport({ width: 1280, height: 720 });
+    await page.setViewport({ width: 1366, height: 900 });
     await page.setUserAgent(config.userAgent);
+    await page.setExtraHTTPHeaders({
+      'accept-language': 'en-US,en;q=0.9',
+      'upgrade-insecure-requests': '1'
+    });
     page.setDefaultNavigationTimeout(this.timeout);
     page.setDefaultTimeout(this.timeout);
     return page;
   }
 
-  async navigateToSearch(page, url) {
-    const response = await page.goto(url, {
+  getProviderSpecificBlockHint() {
+    if (this.provider === 'brightdata') {
+      return 'Costco blocked the Bright Data-backed browser session.';
+    }
+    return 'Costco blocked the local browser session. Bright Data mode is recommended for Costco.';
+  }
+
+  getStatusErrorMessage(status, url) {
+    if (status === 403) {
+      return `Costco returned HTTP 403 for ${url}. ${this.getProviderSpecificBlockHint()}`;
+    }
+    return `Costco returned HTTP ${status} for ${url}.`;
+  }
+
+  async getPageDiagnostics(page, response) {
+    return page.evaluate((status) => {
+      const text = document.body?.innerText || '';
+      const normalized = text.toLowerCase();
+      const html = document.documentElement?.outerHTML || '';
+      return {
+        status,
+        finalUrl: window.location.href,
+        title: document.title,
+        blocked:
+          normalized.includes('access denied') ||
+          normalized.includes("you don't have permission") ||
+          normalized.includes('forbidden') ||
+          normalized.includes('temporarily blocked'),
+        verification:
+          normalized.includes('verify you are human') ||
+          normalized.includes('captcha') ||
+          normalized.includes('security check'),
+        noResults:
+          normalized.includes('no results') ||
+          normalized.includes('0 results') ||
+          normalized.includes('did not match any products'),
+        bodySnippet: text.replace(/\s+/g, ' ').trim().slice(0, 300),
+        htmlSnippet: html.replace(/\s+/g, ' ').trim().slice(0, 300)
+      };
+    }, response && typeof response.status === 'function' ? response.status() : null);
+  }
+
+  logNavigationDiagnostics(stage, diagnostics) {
+    console.log(`${stage} diagnostics`, {
+      provider: this.provider,
+      status: diagnostics.status,
+      finalUrl: diagnostics.finalUrl,
+      title: diagnostics.title,
+      blocked: diagnostics.blocked,
+      verification: diagnostics.verification,
+      noResults: diagnostics.noResults,
+      bodySnippet: diagnostics.bodySnippet
+    });
+  }
+
+  async establishSession(page) {
+    const response = await page.goto(COSTCO_HOME_URL, {
       waitUntil: 'domcontentloaded',
       timeout: this.timeout
     });
+    await page.waitForSelector('body', { timeout: this.timeout });
+    await new Promise((resolve) => setTimeout(resolve, 1500));
 
-    try {
-      await page.waitForSelector(SEARCH_LINK_SELECTOR, { timeout: this.timeout });
-      return;
-    } catch (error) {
-      const pageState = await page.evaluate(() => {
-        const text = document.body?.innerText?.toLowerCase() || '';
-        return {
-          title: document.title,
-          body: text,
-          noResults:
-            text.includes('no results') ||
-            text.includes('0 results') ||
-            text.includes('did not match any products'),
-          blocked:
-            text.includes('access denied') ||
-            text.includes("you don't have permission") ||
-            text.includes('verify you are human') ||
-            text.includes('captcha')
-        };
-      });
+    const diagnostics = await this.getPageDiagnostics(page, response);
+    this.logNavigationDiagnostics('Costco homepage', diagnostics);
 
-      if (pageState.noResults) {
-        return;
-      }
-
-      const status = response && typeof response.status === 'function' ? response.status() : null;
-      if (status && status >= 400) {
-        if (status === 403) {
-          throw new Error(
-            `Costco returned HTTP 403 for ${url}. Bright Data mode is recommended for Costco.`
-          );
-        }
-        throw new Error(`Costco returned HTTP ${status} for ${url}`);
-      }
-
-      if (pageState.blocked) {
-        throw new Error(
-          `Costco blocked the session while loading ${url}. Bright Data mode is recommended for Costco.`
-        );
-      }
-
+    if (diagnostics.blocked || diagnostics.verification) {
       throw new Error(
-        `Timed out waiting for Costco search results on ${url} (title: ${pageState.title || 'unknown'})`
+        `${this.getProviderSpecificBlockHint()} Homepage session establishment failed. ` +
+          `status=${diagnostics.status || 'unknown'} url=${diagnostics.finalUrl} title="${diagnostics.title}" ` +
+          `body="${diagnostics.bodySnippet}"`
       );
     }
+
+    return diagnostics;
+  }
+
+  async trySearchNavigation(page, searchUrl, referer) {
+    await page.setExtraHTTPHeaders({
+      'accept-language': 'en-US,en;q=0.9',
+      referer
+    });
+
+    const response = await page.goto(searchUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: this.timeout
+    });
+    await page.waitForSelector('body', { timeout: this.timeout });
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    let selectorFound = false;
+    try {
+      await page.waitForSelector(SEARCH_LINK_SELECTOR, { timeout: 6000 });
+      selectorFound = true;
+    } catch (error) {
+      selectorFound = false;
+    }
+
+    const diagnostics = await this.getPageDiagnostics(page, response);
+    diagnostics.selectorFound = selectorFound;
+    this.logNavigationDiagnostics('Costco search', diagnostics);
+
+    if (selectorFound) {
+      return diagnostics;
+    }
+
+    if (diagnostics.noResults) {
+      return diagnostics;
+    }
+
+    if (diagnostics.status && diagnostics.status >= 400) {
+      throw new Error(
+        `${this.getStatusErrorMessage(diagnostics.status, searchUrl)} finalUrl=${diagnostics.finalUrl} ` +
+          `title="${diagnostics.title}" blocked=${diagnostics.blocked} verification=${diagnostics.verification} ` +
+          `body="${diagnostics.bodySnippet}" html="${diagnostics.htmlSnippet}"`
+      );
+    }
+
+    if (diagnostics.blocked || diagnostics.verification) {
+      throw new Error(
+        `${this.getProviderSpecificBlockHint()} Search navigation was blocked. ` +
+          `url=${searchUrl} finalUrl=${diagnostics.finalUrl} title="${diagnostics.title}" ` +
+          `body="${diagnostics.bodySnippet}" html="${diagnostics.htmlSnippet}"`
+      );
+    }
+
+    throw new Error(
+      `Timed out waiting for Costco search results on ${searchUrl}. finalUrl=${diagnostics.finalUrl} ` +
+        `title="${diagnostics.title}" body="${diagnostics.bodySnippet}"`
+    );
+  }
+
+  async navigateToSearch(page, query) {
+    const homeDiagnostics = await this.establishSession(page);
+
+    const errors = [];
+    for (const buildUrl of SEARCH_URLS) {
+      const searchUrl = buildUrl(query);
+      console.log(`[>] Costco search: ${searchUrl}`);
+      try {
+        const diagnostics = await this.trySearchNavigation(
+          page,
+          searchUrl,
+          homeDiagnostics.finalUrl || COSTCO_HOME_URL
+        );
+        return { diagnostics, searchUrl };
+      } catch (error) {
+        errors.push(`${searchUrl} -> ${error.message}`);
+      }
+    }
+
+    throw new Error(errors.join(' | '));
   }
 
   async navigateToProduct(page, url) {
+    await this.establishSession(page);
+
     const response = await page.goto(url, {
       waitUntil: 'domcontentloaded',
       timeout: this.timeout
     });
+    await page.waitForSelector('body', { timeout: this.timeout });
+    await new Promise((resolve) => setTimeout(resolve, 1500));
 
-    const status = response && typeof response.status === 'function' ? response.status() : null;
+    const diagnostics = await this.getPageDiagnostics(page, response);
+    this.logNavigationDiagnostics('Costco product', diagnostics);
+
+    const status = diagnostics.status;
     if (status && status >= 400) {
-      throw new Error(`Costco returned HTTP ${status} for ${url}`);
+      throw new Error(
+        `${this.getStatusErrorMessage(status, url)} finalUrl=${diagnostics.finalUrl} ` +
+          `title="${diagnostics.title}" body="${diagnostics.bodySnippet}"`
+      );
+    }
+
+    if (diagnostics.blocked || diagnostics.verification) {
+      throw new Error(
+        `${this.getProviderSpecificBlockHint()} Product navigation was blocked. ` +
+          `finalUrl=${diagnostics.finalUrl} title="${diagnostics.title}" body="${diagnostics.bodySnippet}"`
+      );
     }
 
     await page.waitForSelector(PRODUCT_TITLE_SELECTOR, { timeout: this.timeout });
@@ -129,14 +256,20 @@ class CostcoScraper extends BaseScraper {
 
   async search(query, options = {}) {
     const { limit = 30 } = options;
-    const searchUrl = `https://www.costco.com/CatalogSearch?dept=All&keyword=${encodeURIComponent(query)}`;
     const seenUrls = new Set();
 
     let page;
     try {
       page = await this.getPage();
-      console.log(`[>] Costco search: ${searchUrl}`);
-      await this.navigateToSearch(page, searchUrl);
+      console.log('costco scraper config', {
+        provider: this.provider,
+        hasAuth: Boolean(config.brightdata.auth),
+        browserWSEndpoint: this.browserWSEndpoint || config.brightdata.browserWSEndpoint
+          ? 'configured'
+          : 'missing'
+      });
+
+      await this.navigateToSearch(page, query);
 
       const pageRaw = await page.evaluate(() => {
         const parsePrice = (text) => {
@@ -261,26 +394,15 @@ class CostcoScraper extends BaseScraper {
 
         return {
           title: getText(['h1', '[data-testid*="product-name"]', '[class*="product-name"]']),
-          price: getText([
-            '[data-testid*="price"]',
-            '[class*="price"]',
-            '[id*="price"]'
-          ]),
+          price: getText(['[data-testid*="price"]', '[class*="price"]', '[id*="price"]']),
           description: getText([
             '[data-testid*="description"]',
             '[class*="description"]',
             '#product-details',
             '.product-details'
           ]),
-          rating: getText([
-            '[aria-label*="Rated"]',
-            '[data-testid*="rating"]',
-            '[class*="rating"]'
-          ]),
-          reviews: getText([
-            '[data-testid*="review"]',
-            '[class*="review"]'
-          ])
+          rating: getText(['[aria-label*="Rated"]', '[data-testid*="rating"]', '[class*="rating"]']),
+          reviews: getText(['[data-testid*="review"]', '[class*="review"]'])
         };
       });
 
