@@ -5,6 +5,7 @@
  */
 
 const TargetScraper = require('./TargetScraper');
+const CostcoScraper = require('./CostcoScraper');
 
 /**
  * Map of available stores
@@ -15,6 +16,11 @@ const STORES = {
     name: 'Target',
     scraper: TargetScraper,
     description: 'Target.com product scraper'
+  },
+  costco: {
+    name: 'Costco',
+    scraper: CostcoScraper,
+    description: 'Costco.com product scraper'
   }
   // Future stores:
   // amazon: { name: 'Amazon', scraper: AmazonScraper, ... },

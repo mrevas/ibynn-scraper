@@ -1,6 +1,6 @@
 # Target Search Scraper
 
-A powerful, modular Node.js web scraper for Target.com product searches with support for both local Chromium and Bright Data Browser API sessions.
+A powerful, modular Node.js web scraper for Target.com and Costco.com product searches with support for both local Chromium and Bright Data Browser API sessions.
 
 ## Features
 
@@ -78,6 +78,12 @@ Example Bright Data run:
 TARGET_SCRAPER_PROVIDER=brightdata BRIGHTDATA_AUTH=username:password npm run scrape -- "gaming laptop" 10 1
 ```
 
+Costco via the store registry:
+```javascript
+const { getScraper } = require('./src/stores');
+const scraper = getScraper('costco');
+```
+
 Results are automatically saved to:
 ```
 results/target/{search_query}_{date}.json
@@ -132,9 +138,8 @@ const { getScraper } = require('./src/stores');
 // Get Target scraper
 const scraper = getScraper('target');
 
-// Get other stores when added (Amazon, Walmart, etc.)
-// const scraper = getScraper('amazon');
-// const scraper = getScraper('walmart');
+// Get Costco scraper
+// const scraper = getScraper('costco');
 ```
 
 ## Project Structure
@@ -238,11 +243,12 @@ Sample output structure:
 
 ## Notes
 
-- Respects Target's terms of service - use responsibly
+- Respects store terms of service - use responsibly
 - Add delays between requests if scraping large volumes
 - Some data might be "N/A" if the page structure differs
 - `local` mode launches a bundled Chromium browser via Puppeteer
 - `brightdata` mode connects to Bright Data Browser API over WebSocket
+- Costco commonly blocks direct local-browser sessions; Bright Data mode is recommended there
 
 ## Requirements
 

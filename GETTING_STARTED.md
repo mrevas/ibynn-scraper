@@ -59,6 +59,13 @@ This will:
 2. Return top 10 results
 3. Save to `results_TIMESTAMP.json`
 
+To use Costco programmatically:
+
+```javascript
+const { getScraper } = require('./src/stores');
+const scraper = getScraper('costco', { timeout: 60000 });
+```
+
 ### Programmatic Usage
 
 Create a new JavaScript file:
@@ -191,7 +198,7 @@ module.exports = {
 
 ## API Reference
 
-### TargetScraper Class
+### TargetScraper / CostcoScraper Class
 
 #### Methods
 
@@ -250,10 +257,14 @@ const scraper = new TargetScraper({
 
 ### Element not found errors
 
-Target's page structure may have changed. Check:
+Target or Costco page structure may have changed. Check:
 1. Make sure you're connected to the internet
-2. Test manually at target.com
+2. Test manually at the store site
 3. Try with `headless: false` to debug
+
+Costco note:
+- Costco often blocks direct local Puppeteer sessions with `403 Access Denied`
+- Use `TARGET_SCRAPER_PROVIDER=brightdata` for Costco production traffic
 
 ### Memory issues
 

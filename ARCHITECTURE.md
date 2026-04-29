@@ -41,6 +41,11 @@ const STORES = {
     scraper: TargetScraper,
     description: 'Target.com product scraper'
   },
+  costco: {
+    name: 'Costco',
+    scraper: CostcoScraper,
+    description: 'Costco.com product scraper'
+  },
   // Add new stores here
   amazon: {
     name: 'Amazon',
