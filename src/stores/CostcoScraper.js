@@ -9,6 +9,8 @@ const SEARCH_URLS = [
 ];
 const SEARCH_LINK_SELECTOR = 'a[href*=".product."]';
 const PRODUCT_TITLE_SELECTOR = 'h1, [data-testid*="product-name"], [class*="product-name"]';
+const HOMEPAGE_SEARCH_INPUT_SELECTOR = 'input[placeholder="Search Costco"], input[aria-label="Search Costco"]';
+const HOMEPAGE_SEARCH_BUTTON_SELECTOR = 'button[data-testid="SearchButton"], button[aria-label="Search"]';
 
 class CostcoScraper extends BaseScraper {
   constructor(options = {}) {
@@ -18,6 +20,10 @@ class CostcoScraper extends BaseScraper {
       typeof options.headless === 'boolean' ? options.headless : config.browser.headless;
     this.timeout = options.timeout || config.browser.timeout;
     this.browserWSEndpoint = options.browserWSEndpoint;
+  }
+
+  getStepTimeout(maxTimeout = 20000) {
+    return Math.min(this.timeout, maxTimeout);
   }
 
   async init() {
@@ -60,10 +66,6 @@ class CostcoScraper extends BaseScraper {
     const page = await this.browser.newPage();
     await page.setViewport({ width: 1366, height: 900 });
     await page.setUserAgent(config.userAgent);
-    await page.setExtraHTTPHeaders({
-      'accept-language': 'en-US,en;q=0.9',
-      'upgrade-insecure-requests': '1'
-    });
     page.setDefaultNavigationTimeout(this.timeout);
     page.setDefaultTimeout(this.timeout);
     return page;
@@ -83,32 +85,148 @@ class CostcoScraper extends BaseScraper {
     return `Costco returned HTTP ${status} for ${url}.`;
   }
 
-  async getPageDiagnostics(page, response) {
-    return page.evaluate((status) => {
-      const text = document.body?.innerText || '';
-      const normalized = text.toLowerCase();
-      const html = document.documentElement?.outerHTML || '';
-      return {
+  isSearchNavigationUrl(url, query) {
+    if (!url) {
+      return false;
+    }
+
+    const lowerUrl = url.toLowerCase();
+    const encodedQuery = encodeURIComponent(query).toLowerCase();
+    return (
+      lowerUrl.includes(`/s?keyword=${encodedQuery}`) ||
+      lowerUrl.includes(`/catalogsearch?dept=all&keyword=${encodedQuery}`) ||
+      lowerUrl.includes(`keyword=${encodedQuery}`)
+    );
+  }
+
+  trackSearchNavigation(page, query) {
+    const events = {
+      requestUrl: null,
+      responseUrl: null,
+      responseStatus: null,
+      requestFailure: null
+    };
+
+    const matches = (url) => this.isSearchNavigationUrl(url, query);
+    const onRequest = (request) => {
+      if (request.isNavigationRequest() && matches(request.url()) && !events.requestUrl) {
+        events.requestUrl = request.url();
+      }
+    };
+    const onResponse = (response) => {
+      const request = response.request();
+      if (request.isNavigationRequest() && matches(response.url()) && !events.responseUrl) {
+        events.responseUrl = response.url();
+        events.responseStatus = response.status();
+      }
+    };
+    const onRequestFailed = (request) => {
+      if (request.isNavigationRequest() && matches(request.url()) && !events.requestFailure) {
+        events.requestUrl = events.requestUrl || request.url();
+        events.requestFailure = request.failure()?.errorText || 'request failed';
+      }
+    };
+
+    page.on('request', onRequest);
+    page.on('response', onResponse);
+    page.on('requestfailed', onRequestFailed);
+
+    return {
+      events,
+      stop: () => {
+        page.off('request', onRequest);
+        page.off('response', onResponse);
+        page.off('requestfailed', onRequestFailed);
+      }
+    };
+  }
+
+  async getCookieCount(page) {
+    try {
+      const cookies = await page.cookies();
+      return cookies.length;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async getPageDiagnostics(page, response, fallback = {}) {
+    const responseStatus =
+      response && typeof response.status === 'function' ? response.status() : null;
+    const status = responseStatus ?? fallback.responseStatus ?? fallback.status ?? null;
+
+    const pageData = await page
+      .evaluate((currentStatus) => {
+        const text = document.body?.innerText || '';
+        const normalized = text.toLowerCase();
+        const html = document.documentElement?.outerHTML || '';
+        return {
+          status: currentStatus,
+          finalUrl: window.location.href,
+          title: document.title,
+          blocked:
+            normalized.includes('access denied') ||
+            normalized.includes("you don't have permission") ||
+            normalized.includes('forbidden') ||
+            normalized.includes('temporarily blocked'),
+          verification:
+            normalized.includes('verify you are human') ||
+            normalized.includes('captcha') ||
+            normalized.includes('security check'),
+          homepage:
+            window.location.href === 'https://www.costco.com/' ||
+            document.title === 'Welcome to Costco Wholesale',
+          noResults:
+            normalized.includes('no results') ||
+            normalized.includes('0 results') ||
+            normalized.includes('did not match any products'),
+          bodySnippet: text.replace(/\s+/g, ' ').trim().slice(0, 300),
+          htmlSnippet: html.replace(/\s+/g, ' ').trim().slice(0, 300)
+        };
+      }, status)
+      .catch((error) => ({
         status,
-        finalUrl: window.location.href,
-        title: document.title,
-        blocked:
-          normalized.includes('access denied') ||
-          normalized.includes("you don't have permission") ||
-          normalized.includes('forbidden') ||
-          normalized.includes('temporarily blocked'),
-        verification:
-          normalized.includes('verify you are human') ||
-          normalized.includes('captcha') ||
-          normalized.includes('security check'),
-        noResults:
-          normalized.includes('no results') ||
-          normalized.includes('0 results') ||
-          normalized.includes('did not match any products'),
-        bodySnippet: text.replace(/\s+/g, ' ').trim().slice(0, 300),
-        htmlSnippet: html.replace(/\s+/g, ' ').trim().slice(0, 300)
-      };
-    }, response && typeof response.status === 'function' ? response.status() : null);
+        finalUrl: page.url(),
+        title: 'N/A',
+        blocked: false,
+        verification: false,
+        homepage: page.url() === COSTCO_HOME_URL,
+        noResults: false,
+        bodySnippet: `Unable to read page body: ${error.message}`,
+        htmlSnippet: ''
+      }));
+
+    return {
+      ...pageData,
+      requestUrl: fallback.requestUrl || null,
+      responseUrl: fallback.responseUrl || null,
+      responseStatus: fallback.responseStatus ?? responseStatus ?? null,
+      requestFailure: fallback.requestFailure || null,
+      navigationError: fallback.navigationError || null,
+      cookieCount: fallback.cookieCount ?? null
+    };
+  }
+
+  getSearchTimeoutMessage(searchUrl, diagnostics) {
+    const requestSummary = diagnostics.requestUrl
+      ? `requestUrl=${diagnostics.requestUrl}`
+      : 'requestUrl=none';
+    const responseSummary =
+      diagnostics.responseStatus != null
+        ? `responseStatus=${diagnostics.responseStatus} responseUrl=${diagnostics.responseUrl || 'unknown'}`
+        : 'responseStatus=none';
+    const failureSummary = diagnostics.requestFailure
+      ? `requestFailure=${diagnostics.requestFailure}`
+      : 'requestFailure=none';
+    const navigationSummary = diagnostics.navigationError
+      ? `navigationError="${diagnostics.navigationError}"`
+      : 'navigationError=none';
+
+    return (
+      `Costco search did not finish for ${searchUrl}. ${requestSummary} ${responseSummary} ` +
+      `${failureSummary} ${navigationSummary} finalUrl=${diagnostics.finalUrl} title="${diagnostics.title}" ` +
+      `body="${diagnostics.bodySnippet}"`
+    );
   }
 
   logNavigationDiagnostics(stage, diagnostics) {
@@ -119,7 +237,14 @@ class CostcoScraper extends BaseScraper {
       title: diagnostics.title,
       blocked: diagnostics.blocked,
       verification: diagnostics.verification,
+      homepage: diagnostics.homepage,
       noResults: diagnostics.noResults,
+      requestUrl: diagnostics.requestUrl,
+      responseUrl: diagnostics.responseUrl,
+      responseStatus: diagnostics.responseStatus,
+      requestFailure: diagnostics.requestFailure,
+      navigationError: diagnostics.navigationError,
+      cookieCount: diagnostics.cookieCount,
       bodySnippet: diagnostics.bodySnippet
     });
   }
@@ -130,9 +255,13 @@ class CostcoScraper extends BaseScraper {
       timeout: this.timeout
     });
     await page.waitForSelector('body', { timeout: this.timeout });
+    await page.waitForSelector(HOMEPAGE_SEARCH_INPUT_SELECTOR, { timeout: this.timeout });
+    await page.waitForNetworkIdle({ idleTime: 750, timeout: 5000 }).catch(() => null);
     await new Promise((resolve) => setTimeout(resolve, 1500));
 
-    const diagnostics = await this.getPageDiagnostics(page, response);
+    const diagnostics = await this.getPageDiagnostics(page, response, {
+      cookieCount: await this.getCookieCount(page)
+    });
     this.logNavigationDiagnostics('Costco homepage', diagnostics);
 
     if (diagnostics.blocked || diagnostics.verification) {
@@ -146,17 +275,21 @@ class CostcoScraper extends BaseScraper {
     return diagnostics;
   }
 
-  async trySearchNavigation(page, searchUrl, referer) {
-    await page.setExtraHTTPHeaders({
-      'accept-language': 'en-US,en;q=0.9',
-      referer
-    });
+  async trySearchNavigation(page, query, searchUrl, referer) {
+    const navigationProbe = this.trackSearchNavigation(page, query);
+    let navigationError = null;
+    const response = await page
+      .goto(searchUrl, {
+        referer,
+        waitUntil: 'domcontentloaded',
+        timeout: this.getStepTimeout()
+      })
+      .catch((error) => {
+        navigationError = error.message;
+        return null;
+      });
 
-    const response = await page.goto(searchUrl, {
-      waitUntil: 'domcontentloaded',
-      timeout: this.timeout
-    });
-    await page.waitForSelector('body', { timeout: this.timeout });
+    await page.waitForSelector('body', { timeout: 5000 }).catch(() => null);
     await new Promise((resolve) => setTimeout(resolve, 2000));
 
     let selectorFound = false;
@@ -167,7 +300,12 @@ class CostcoScraper extends BaseScraper {
       selectorFound = false;
     }
 
-    const diagnostics = await this.getPageDiagnostics(page, response);
+    const diagnostics = await this.getPageDiagnostics(page, response, {
+      ...navigationProbe.events,
+      navigationError,
+      cookieCount: await this.getCookieCount(page)
+    });
+    navigationProbe.stop();
     diagnostics.selectorFound = selectorFound;
     this.logNavigationDiagnostics('Costco search', diagnostics);
 
@@ -195,22 +333,124 @@ class CostcoScraper extends BaseScraper {
       );
     }
 
-    throw new Error(
-      `Timed out waiting for Costco search results on ${searchUrl}. finalUrl=${diagnostics.finalUrl} ` +
-        `title="${diagnostics.title}" body="${diagnostics.bodySnippet}"`
-    );
+    throw new Error(this.getSearchTimeoutMessage(searchUrl, diagnostics));
+  }
+
+  async tryHomepageSearch(page, query) {
+    await page.waitForSelector(HOMEPAGE_SEARCH_INPUT_SELECTOR, { timeout: this.timeout });
+    await page.click(HOMEPAGE_SEARCH_INPUT_SELECTOR, { clickCount: 3 });
+    await page.keyboard.press('Backspace');
+    await page.type(HOMEPAGE_SEARCH_INPUT_SELECTOR, query, { delay: 80 });
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
+    const stepTimeout = this.getStepTimeout(15000);
+    const navigationProbe = this.trackSearchNavigation(page, query);
+    let navigationError = null;
+    const startUrl = page.url();
+    const navigationPromise = page
+      .waitForNavigation({
+        waitUntil: 'domcontentloaded',
+        timeout: stepTimeout
+      })
+      .catch((error) => {
+        navigationError = error.message;
+        return null;
+      });
+    const urlChangePromise = page
+      .waitForFunction(
+        (currentUrl) => window.location.href !== currentUrl,
+        { timeout: stepTimeout },
+        startUrl
+      )
+      .catch(() => null);
+
+    if (await page.$(HOMEPAGE_SEARCH_BUTTON_SELECTOR)) {
+      await page.$eval(HOMEPAGE_SEARCH_BUTTON_SELECTOR, (el) => el.click());
+    } else {
+      await page.keyboard.press('Enter');
+    }
+
+    await Promise.race([
+      navigationPromise,
+      urlChangePromise,
+      new Promise((resolve) => setTimeout(resolve, stepTimeout))
+    ]);
+    const bodyWaitError = await page
+      .waitForSelector('body', { timeout: 5000 })
+      .then(() => null)
+      .catch((error) => error);
+    if (bodyWaitError) {
+      navigationError = [navigationError, `body wait failed: ${bodyWaitError.message}`]
+        .filter(Boolean)
+        .join('; ');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    let selectorFound = false;
+    try {
+      await page.waitForSelector(SEARCH_LINK_SELECTOR, { timeout: 6000 });
+      selectorFound = true;
+    } catch (error) {
+      selectorFound = false;
+    }
+
+    const diagnostics = await this.getPageDiagnostics(page, null, {
+      ...navigationProbe.events,
+      navigationError,
+      cookieCount: await this.getCookieCount(page)
+    });
+    navigationProbe.stop();
+    diagnostics.selectorFound = selectorFound;
+    diagnostics.queryVisible = diagnostics.bodySnippet.toLowerCase().includes(query.toLowerCase());
+    this.logNavigationDiagnostics('Costco homepage search', diagnostics);
+
+    const looksLikeSearchResults =
+      !diagnostics.homepage &&
+      (diagnostics.finalUrl.toLowerCase().includes('keyword=') ||
+        diagnostics.finalUrl.toLowerCase().includes('/s?') ||
+        diagnostics.queryVisible);
+
+    if ((selectorFound && looksLikeSearchResults) || diagnostics.noResults) {
+      return diagnostics;
+    }
+
+    if (diagnostics.status && diagnostics.status >= 400) {
+      throw new Error(
+        `${this.getStatusErrorMessage(diagnostics.status, diagnostics.finalUrl)} finalUrl=${diagnostics.finalUrl} ` +
+          `title="${diagnostics.title}" blocked=${diagnostics.blocked} verification=${diagnostics.verification} ` +
+          `body="${diagnostics.bodySnippet}" html="${diagnostics.htmlSnippet}"`
+      );
+    }
+
+    if (diagnostics.blocked || diagnostics.verification) {
+      throw new Error(
+        `${this.getProviderSpecificBlockHint()} Homepage search submission was blocked. ` +
+          `finalUrl=${diagnostics.finalUrl} title="${diagnostics.title}" ` +
+          `body="${diagnostics.bodySnippet}" html="${diagnostics.htmlSnippet}"`
+      );
+    }
+
+    throw new Error(this.getSearchTimeoutMessage('homepage-search-ui', diagnostics));
   }
 
   async navigateToSearch(page, query) {
     const homeDiagnostics = await this.establishSession(page);
 
     const errors = [];
+    try {
+      const diagnostics = await this.tryHomepageSearch(page, query);
+      return { diagnostics, searchUrl: 'homepage-search-ui' };
+    } catch (error) {
+      errors.push(`homepage-search-ui -> ${error.message}`);
+    }
+
     for (const buildUrl of SEARCH_URLS) {
       const searchUrl = buildUrl(query);
       console.log(`[>] Costco search: ${searchUrl}`);
       try {
         const diagnostics = await this.trySearchNavigation(
           page,
+          query,
           searchUrl,
           homeDiagnostics.finalUrl || COSTCO_HOME_URL
         );

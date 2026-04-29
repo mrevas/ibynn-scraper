@@ -3,7 +3,13 @@ function parseNumber(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-const brightDataAuth = process.env.BRIGHTDATA_AUTH;
+function readEnv(name) {
+  const value = process.env[name];
+  return value && value.trim() ? value.trim() : null;
+}
+
+const brightDataAuth = readEnv('BRIGHTDATA_AUTH');
+const brightDataBrowserWS = readEnv('BRIGHTDATA_BROWSER_WS');
 
 /**
  * Configuration file for Target Scraper
@@ -17,14 +23,17 @@ module.exports = {
     headless: process.env.TARGET_SCRAPER_HEADLESS
       ? process.env.TARGET_SCRAPER_HEADLESS !== 'false'
       : true,
-    timeout: parseNumber(process.env.TARGET_SCRAPER_TIMEOUT, 60000),
+    timeout: parseNumber(
+      process.env.TARGET_SCRAPER_TIMEOUT || process.env.TARGET_SCRAPER_TIMEOUT_MS,
+      60000
+    ),
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   },
 
   brightdata: {
     auth: brightDataAuth || null,
     browserWSEndpoint:
-      process.env.BRIGHTDATA_BROWSER_WS ||
+      brightDataBrowserWS ||
       (brightDataAuth ? `wss://${brightDataAuth}@brd.superproxy.io:9222` : null)
   },
 
