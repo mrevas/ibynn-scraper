@@ -1,3 +1,10 @@
+function parseNumber(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+const brightDataAuth = process.env.BRIGHTDATA_AUTH;
+
 /**
  * Configuration file for Target Scraper
  * Edit this file to customize default settings
@@ -6,9 +13,19 @@
 module.exports = {
   // Browser settings
   browser: {
-    headless: true,
-    timeout: 30000,
+    provider: process.env.TARGET_SCRAPER_PROVIDER || 'local',
+    headless: process.env.TARGET_SCRAPER_HEADLESS
+      ? process.env.TARGET_SCRAPER_HEADLESS !== 'false'
+      : true,
+    timeout: parseNumber(process.env.TARGET_SCRAPER_TIMEOUT, 60000),
     args: ['--no-sandbox', '--disable-setuid-sandbox']
+  },
+
+  brightdata: {
+    auth: brightDataAuth || null,
+    browserWSEndpoint:
+      process.env.BRIGHTDATA_BROWSER_WS ||
+      (brightDataAuth ? `wss://${brightDataAuth}@brd.superproxy.io:9222` : null)
   },
 
   // Default search settings

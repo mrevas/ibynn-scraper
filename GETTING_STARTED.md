@@ -16,12 +16,33 @@ cd ibynn-scraper
 
 # Install dependencies
 npm install
-npx playwright install chromium
 ```
 
 This will install:
-- **playwright** - Browser automation library
+- **puppeteer** - Browser automation library and bundled Chromium for local mode
 - **cheerio** - HTML parsing library
+
+### 3. Choose a Browser Provider
+
+Local mode:
+
+```bash
+TARGET_SCRAPER_PROVIDER=local
+```
+
+Bright Data mode:
+
+```bash
+TARGET_SCRAPER_PROVIDER=brightdata
+BRIGHTDATA_AUTH=username:password
+```
+
+Optional overrides:
+
+```bash
+BRIGHTDATA_BROWSER_WS=wss://username:password@brd.superproxy.io:9222
+TARGET_SCRAPER_TIMEOUT=60000
+```
 
 ## Quick Start
 
@@ -156,8 +177,9 @@ Edit `config.js` to customize defaults:
 ```javascript
 module.exports = {
   browser: {
+    provider: 'local',
     headless: true,
-    timeout: 30000
+    timeout: 60000
   },
   search: {
     limit: 20,
@@ -199,11 +221,22 @@ Static utility methods:
 ### Browser fails to launch
 
 ```bash
-# Install system dependencies (macOS)
-brew install chromium
+# Reinstall local dependencies if the bundled browser is missing
+npm install
+```
 
-# Install system dependencies (Linux - Ubuntu/Debian)
-sudo apt-get install -y chromium-browser
+For Bright Data production runs, make sure these exact env vars are set:
+
+```bash
+TARGET_SCRAPER_PROVIDER=brightdata
+BRIGHTDATA_AUTH=username:password
+```
+
+Optional:
+
+```bash
+BRIGHTDATA_BROWSER_WS=wss://username:password@brd.superproxy.io:9222
+TARGET_SCRAPER_TIMEOUT=60000
 ```
 
 ### Timeout errors

@@ -101,7 +101,7 @@ Create `src/stores/AmazonScraper.js`:
 
 ```javascript
 const BaseScraper = require('./BaseScraper');
-const { chromium } = require('playwright');
+const { createBrowser } = require('../browser');
 
 class AmazonScraper extends BaseScraper {
   constructor(options = {}) {
@@ -109,7 +109,7 @@ class AmazonScraper extends BaseScraper {
   }
 
   async init() {
-    // Initialize Playwright browser
+    // Initialize local Puppeteer or Bright Data Browser API session
   }
 
   async close() {

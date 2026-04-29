@@ -1,6 +1,9 @@
-const { chromium } = require('playwright');
 const BaseScraper = require('./BaseScraper');
 const config = require('../../config');
+const { createBrowser, getBrowserProvider } = require('../browser');
+
+const SEARCH_LINK_SELECTOR = 'a[href*="/p/"]';
+const PRODUCT_TITLE_SELECTOR = '[data-test="@web/ProductTitle"]';
 
 /**
  * Target.com Scraper
@@ -9,6 +12,11 @@ const config = require('../../config');
 class TargetScraper extends BaseScraper {
   constructor(options = {}) {
     super('Target', options);
+    this.provider = getBrowserProvider(options);
+    this.headless =
+      typeof options.headless === 'boolean' ? options.headless : config.browser.headless;
+    this.timeout = options.timeout || config.browser.timeout;
+    this.browserWSEndpoint = options.browserWSEndpoint;
   }
 
   /**
@@ -16,18 +24,15 @@ class TargetScraper extends BaseScraper {
    */
   async init() {
     try {
-      this.browser = await chromium.launch({
+      this.browser = await createBrowser({
+        provider: this.provider,
         headless: this.headless,
-        args: config.browser.args
+        timeout: this.timeout,
+        browserWSEndpoint: this.browserWSEndpoint
       });
-      this.context = await this.browser.newContext({
-        viewport: { width: 1280, height: 720 },
-        userAgent: config.userAgent
-      });
-      console.log('[OK] Browser initialized');
+      console.log(`[OK] Browser initialized (${this.provider})`);
     } catch (error) {
-      console.error('[X] Failed to initialize browser:', error.message);
-      throw error;
+      throw new Error(`Failed to initialize ${this.provider} browser: ${error.message}`);
     }
   }
 
@@ -35,22 +40,90 @@ class TargetScraper extends BaseScraper {
    * Close browser
    */
   async close() {
-    if (this.context) {
-      await this.context.close();
-      this.context = null;
+    if (!this.browser) {
+      return;
     }
-    if (this.browser) {
-      await this.browser.close();
+
+    try {
+      if (this.provider === 'brightdata') {
+        await this.browser.disconnect();
+        console.log('[OK] Browser disconnected');
+      } else {
+        await this.browser.close();
+        console.log('[OK] Browser closed');
+      }
+    } finally {
       this.browser = null;
-      console.log('[OK] Browser closed');
     }
   }
 
   async getPage() {
-    if (!this.browser || !this.context) {
+    if (!this.browser) {
       await this.init();
     }
-    return this.context.newPage();
+
+    const page = await this.browser.newPage();
+    await page.setViewport({ width: 1280, height: 720 });
+    await page.setUserAgent(config.userAgent);
+    page.setDefaultNavigationTimeout(this.timeout);
+    page.setDefaultTimeout(this.timeout);
+    return page;
+  }
+
+  async navigateToSearch(page, url) {
+    const response = await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: this.timeout
+    });
+
+    if (response && response.status() >= 400) {
+      throw new Error(`Target returned HTTP ${response.status()} for ${url}`);
+    }
+
+    try {
+      await page.waitForSelector(SEARCH_LINK_SELECTOR, { timeout: this.timeout });
+      return;
+    } catch (error) {
+      const pageState = await page.evaluate(() => {
+        const text = document.body?.innerText?.toLowerCase() || '';
+        return {
+          title: document.title,
+          noResults:
+            text.includes('no results') ||
+            text.includes('0 results') ||
+            text.includes('did not match any products'),
+          blocked:
+            text.includes('access denied') ||
+            text.includes('verify you are human') ||
+            text.includes('captcha')
+        };
+      });
+
+      if (pageState.noResults) {
+        return;
+      }
+
+      if (pageState.blocked) {
+        throw new Error(`Target blocked the session while loading ${url}`);
+      }
+
+      throw new Error(
+        `Timed out waiting for Target search results on ${url} (title: ${pageState.title || 'unknown'})`
+      );
+    }
+  }
+
+  async navigateToProduct(page, url) {
+    const response = await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: this.timeout
+    });
+
+    if (response && response.status() >= 400) {
+      throw new Error(`Target returned HTTP ${response.status()} for ${url}`);
+    }
+
+    await page.waitForSelector(PRODUCT_TITLE_SELECTOR, { timeout: this.timeout });
   }
 
   /**
@@ -73,18 +146,7 @@ class TargetScraper extends BaseScraper {
       let tab;
       try {
         tab = await this.getPage();
-        await tab.goto(searchUrl, { waitUntil: 'networkidle', timeout: this.timeout });
-
-        if (pageNum === 1) {
-          console.log('[..] Pausing briefly for first-page rendering...');
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-
-        try {
-          await tab.waitForSelector('a[href*="/p/"]', { timeout: 10000 });
-        } catch (error) {
-          console.log(`[!] No products found on page ${pageNum}`);
-        }
+        await this.navigateToSearch(tab, searchUrl);
 
         const pageRaw = await tab.evaluate(() => {
           const items = [];
@@ -184,7 +246,7 @@ class TargetScraper extends BaseScraper {
 
         console.log(`[OK] Page ${pageNum}: ${pageRaw.length} products (total so far: ${allRaw.length})`);
       } catch (error) {
-        console.error(`[X] Error on page ${pageNum}:`, error.message);
+        throw new Error(`Target search failed on page ${pageNum} for "${query}": ${error.message}`);
       } finally {
         if (tab) {
           await tab.close();
@@ -228,7 +290,7 @@ class TargetScraper extends BaseScraper {
       const url = `https://www.target.com/p/${productId}`;
       console.log(`[>] Fetching product details for ID: ${productId}`);
 
-      await page.goto(url, { waitUntil: 'networkidle', timeout: this.timeout });
+      await this.navigateToProduct(page, url);
 
       const details = await page.evaluate(() => {
         const title = document.querySelector('[data-test="@web/ProductTitle"]')?.textContent?.trim() || 'N/A';
@@ -243,8 +305,7 @@ class TargetScraper extends BaseScraper {
       console.log('[OK] Product details retrieved');
       return details;
     } catch (error) {
-      console.error('[X] Failed to get product details:', error.message);
-      throw error;
+      throw new Error(`Failed to get Target product details for ${productId}: ${error.message}`);
     } finally {
       if (page) {
         await page.close();

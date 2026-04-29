@@ -1,6 +1,6 @@
 # Target Search Scraper
 
-A powerful, modular Node.js web scraper for Target.com product searches built with Playwright. Designed to be easily extensible for scraping other stores in the future.
+A powerful, modular Node.js web scraper for Target.com product searches with support for both local Chromium and Bright Data Browser API sessions.
 
 ## Features
 
@@ -26,7 +26,39 @@ cd ibynn-scraper
 2. Install dependencies:
 ```bash
 npm install
-npx playwright install chromium
+```
+
+If you are updating an existing checkout from the older Playwright-based version, delete `node_modules` and `package-lock.json`, then run:
+```bash
+npm install
+```
+
+### Browser Providers
+
+The scraper supports two browser providers selected via environment variables:
+
+- `local`
+- `brightdata`
+
+Local mode:
+```bash
+TARGET_SCRAPER_PROVIDER=local
+```
+
+Bright Data mode:
+```bash
+TARGET_SCRAPER_PROVIDER=brightdata
+BRIGHTDATA_AUTH=username:password
+```
+
+Optional Bright Data override:
+```bash
+BRIGHTDATA_BROWSER_WS=wss://username:password@brd.superproxy.io:9222
+```
+
+Optional production timeout:
+```bash
+TARGET_SCRAPER_TIMEOUT=60000
 ```
 
 ### Usage
@@ -39,6 +71,11 @@ npm run scrape -- "gaming laptop"
 Search with custom limit:
 ```bash
 npm run scrape -- "wireless headphones" 50
+```
+
+Example Bright Data run:
+```bash
+TARGET_SCRAPER_PROVIDER=brightdata BRIGHTDATA_AUTH=username:password npm run scrape -- "gaming laptop" 10 1
 ```
 
 Results are automatically saved to:
@@ -127,7 +164,7 @@ Edit `config.js` to customize defaults:
 
 ```javascript
 module.exports = {
-  browser: { headless: true, timeout: 30000 },
+  browser: { provider: 'local', headless: true, timeout: 60000 },
   search: {
     limit: 30,              // Default number of results
     sort: 'relevance'
@@ -204,7 +241,8 @@ Sample output structure:
 - Respects Target's terms of service - use responsibly
 - Add delays between requests if scraping large volumes
 - Some data might be "N/A" if the page structure differs
-- Requires Playwright's Chromium browser (`npx playwright install chromium`)
+- `local` mode launches a bundled Chromium browser via Puppeteer
+- `brightdata` mode connects to Bright Data Browser API over WebSocket
 
 ## Requirements
 
@@ -213,7 +251,7 @@ Sample output structure:
 
 ## Dependencies
 
-- **playwright** - Headless browser automation
+- **puppeteer** - Headless browser automation
 - **cheerio** - jQuery-like HTML parsing
 
 ## License

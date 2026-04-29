@@ -1,7 +1,7 @@
 {
   "name": "ibynn-target-scraper",
   "version": "1.0.0",
-  "description": "A web scraper for Target search results powered by Playwright",
+  "description": "A web scraper for Target search results with local and Bright Data browser support",
   "main": "src/scraper.js",
   "bin": {
     "ibynn-scrape": "src/cli.js"
@@ -22,7 +22,8 @@
     "scraper",
     "target",
     "web-scraping",
-    "playwright"
+    "puppeteer",
+    "bright-data"
   ],
   "author": "",
   "license": "ISC",
@@ -30,7 +31,7 @@
     "node": ">=16.0.0"
   },
   "dependencies": {
-    "playwright": "^1.54.2",
+    "puppeteer": "^24.26.1",
     "cheerio": "^1.0.0-rc.12"
   },
   "devDependencies": {}

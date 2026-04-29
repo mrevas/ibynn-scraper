@@ -2,24 +2,35 @@
  * Detailed diagnostic tool to inspect what Target returns
  */
 
-const { chromium } = require('playwright');
 const config = require('./config');
+const { createBrowser, getBrowserProvider } = require('./src/browser');
 
 async function diagnose(query = 'laptop') {
-  const browser = await chromium.launch({ headless: true, args: config.browser.args });
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 720 },
-    userAgent: config.userAgent
+  const provider = getBrowserProvider();
+  const browser = await createBrowser({
+    provider,
+    headless: true,
+    timeout: config.browser.timeout
   });
-  const page = await context.newPage();
+  const page = await browser.newPage();
 
   try {
+    await page.setViewport({ width: 1280, height: 720 });
+    await page.setUserAgent(config.userAgent);
+    page.setDefaultNavigationTimeout(config.browser.timeout);
+    page.setDefaultTimeout(config.browser.timeout);
+
     const searchUrl = `https://www.target.com/s?searchTerm=${encodeURIComponent(query)}`;
     console.log(`\n[?] Diagnosing: ${query}`);
-    console.log(`[i] URL: ${searchUrl}\n`);
+    console.log(`[i] URL: ${searchUrl}`);
+    console.log(`[i] Provider: ${provider}\n`);
 
     console.log('[>] Navigating...');
-    const response = await page.goto(searchUrl, { waitUntil: 'networkidle' });
+    const response = await page.goto(searchUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: config.browser.timeout
+    });
+    await page.waitForSelector('body', { timeout: config.browser.timeout });
     console.log(`[OK] Response status: ${response?.status()}\n`);
 
     console.log('[>] Waiting for dynamic content...');
@@ -84,7 +95,11 @@ async function diagnose(query = 'laptop') {
   } catch (error) {
     console.error('[X] Error:', error.message);
   } finally {
-    await browser.close();
+    if (provider === 'brightdata') {
+      await browser.disconnect();
+    } else {
+      await browser.close();
+    }
   }
 }
 

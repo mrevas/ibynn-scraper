@@ -3,23 +3,34 @@
  * Helps identify what selectors are available on Target pages
  */
 
-const { chromium } = require('playwright');
 const config = require('./config');
+const { createBrowser, getBrowserProvider } = require('./src/browser');
 
 class DebugScraper {
+  constructor() {
+    this.provider = getBrowserProvider();
+    this.timeout = config.browser.timeout;
+  }
+
   async inspectPage(query) {
-    const browser = await chromium.launch({ headless: false, args: config.browser.args });
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 720 },
-      userAgent: config.userAgent
+    const browser = await createBrowser({
+      provider: this.provider,
+      headless: false,
+      timeout: this.timeout
     });
-    const page = await context.newPage();
+    const page = await browser.newPage();
 
     try {
+      await page.setViewport({ width: 1280, height: 720 });
+      await page.setUserAgent(config.userAgent);
+      page.setDefaultNavigationTimeout(this.timeout);
+      page.setDefaultTimeout(this.timeout);
+
       const searchUrl = `https://www.target.com/s?searchTerm=${encodeURIComponent(query)}`;
       console.log(`[>] Navigating to: ${searchUrl}\n`);
 
-      await page.goto(searchUrl, { waitUntil: 'networkidle', timeout: 30000 });
+      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: this.timeout });
+      await page.waitForSelector('body', { timeout: this.timeout });
 
       console.log('[i] Page Analysis:\n');
 
@@ -79,16 +90,20 @@ class DebugScraper {
         });
       }
 
-      console.log('\n[OK] Browser opened for manual inspection...');
+      console.log(`\n[OK] Browser opened for manual inspection via ${this.provider}...`);
       console.log('Close the browser window to end analysis.\n');
 
       await new Promise((resolve) => {
-        page.context().browser().once('disconnected', resolve);
+        browser.once('disconnected', resolve);
       });
     } catch (error) {
       console.error('Error:', error.message);
     } finally {
-      await browser.close();
+      if (this.provider === 'brightdata') {
+        await browser.disconnect();
+      } else {
+        await browser.close();
+      }
     }
   }
 }
