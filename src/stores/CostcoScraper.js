@@ -641,6 +641,7 @@ class CostcoScraper extends BaseScraper {
       console.log(`[OK] Done - ${products.length} total Costco products`);
       return products;
     } catch (error) {
+      await this.logBrightDataSessionDiagnostics('Costco search Bright Data session');
       throw new Error(`Costco search failed for "${query}": ${error.message}`);
     } finally {
       if (page) {
@@ -685,6 +686,7 @@ class CostcoScraper extends BaseScraper {
       console.log('[OK] Costco product details retrieved');
       return details;
     } catch (error) {
+      await this.logBrightDataSessionDiagnostics('Costco product Bright Data session');
       throw new Error(`Failed to get Costco product details for ${productId}: ${error.message}`);
     } finally {
       if (page) {

@@ -1,3 +1,5 @@
+const { logBrightDataSessionDiagnostics } = require('../brightdata-session');
+
 /**
  * Base Scraper Adapter
  * All store scrapers should extend this class
@@ -45,6 +47,22 @@ class BaseScraper {
    */
   async getProductDetails(productId) {
     throw new Error('getProductDetails() must be implemented by subclass');
+  }
+
+  async logBrightDataSessionDiagnostics(contextLabel) {
+    if (!this.browser || this.provider !== 'brightdata') {
+      return null;
+    }
+
+    try {
+      return await logBrightDataSessionDiagnostics(this.browser, contextLabel);
+    } catch (error) {
+      console.log(`${contextLabel} diagnostics`, {
+        lookup: 'failed',
+        error: error.message
+      });
+      return null;
+    }
   }
 }
 

@@ -1,4 +1,5 @@
 const config = require('../config');
+const { attachBrightDataSessionIdFromPage } = require('./brightdata-session');
 
 async function humanDelay(minMs = 600, maxMs = 1600) {
   const delay = minMs + Math.floor(Math.random() * Math.max(maxMs - minMs, 1));
@@ -24,6 +25,8 @@ async function applyPageHardening(page, options = {}) {
     page.setDefaultNavigationTimeout(options.timeout);
     page.setDefaultTimeout(options.timeout);
   }
+
+  await attachBrightDataSessionIdFromPage(page);
 }
 
 async function getCookieCount(page) {

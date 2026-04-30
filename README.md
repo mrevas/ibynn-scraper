@@ -61,6 +61,13 @@ Optional production timeout:
 TARGET_SCRAPER_TIMEOUT=60000
 ```
 
+Optional Bright Data session diagnostics:
+```bash
+BRIGHTDATA_API_KEY=your_brightdata_api_key
+```
+
+When `BRIGHTDATA_API_KEY` is set, scraper failures log the Bright Data Browser API session details, including session status, end URL, navigation count, captcha status, bandwidth, and provider-side errors.
+
 ### Usage
 
 Search for products (defaults to 30 results):
@@ -131,7 +138,7 @@ node src/walmart-cli.js "milk" 10 --manual-challenge --user-agent=auto --user-da
 
 When Amazon Fresh, Costco, or Walmart shows a challenge page, solve it in the opened browser, then press Enter in the terminal. The scraper will reuse the same browser/profile and continue extracting if the page reaches search results.
 
-The Costco and Walmart CLIs share these local hardening flags:
+Amazon Fresh, Costco, and Walmart CLIs share these local hardening flags:
 ```bash
 --headful
 --manual-challenge
@@ -156,6 +163,10 @@ Example:
 - `results/target/wireless_headphones_2026-04-23.json`
 
 ## API Reference
+
+For API integration details, including provider options, production env vars,
+Amazon Fresh ZIP handling, hardening behavior, and Bright Data session
+diagnostics, see [API_AGENT_GUIDE.md](./API_AGENT_GUIDE.md).
 
 ### Using as a Module
 

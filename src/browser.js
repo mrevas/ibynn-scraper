@@ -78,10 +78,12 @@ async function createBrowser(options = {}) {
   if (provider === 'brightdata') {
     const browserWSEndpoint = getBrightDataBrowserWSEndpoint(options);
     try {
-      return await puppeteer.connect({
+      const browser = await puppeteer.connect({
         browserWSEndpoint,
         protocolTimeout: options.timeout || config.browser.timeout
       });
+      browser.__isBrightData = true;
+      return browser;
     } catch (error) {
       throw new Error(getBrightDataConnectionErrorMessage(error, browserWSEndpoint));
     }

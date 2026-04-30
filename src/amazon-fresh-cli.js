@@ -39,6 +39,7 @@ Provider env:
   TARGET_SCRAPER_PROVIDER=local|brightdata
   BRIGHTDATA_AUTH=username:password
   BRIGHTDATA_BROWSER_WS=wss://username:password@brd.superproxy.io:9222
+  BRIGHTDATA_API_KEY=your_brightdata_api_key
   TARGET_SCRAPER_HEADLESS=false
   AMAZON_FRESH_ZIP=11435
 

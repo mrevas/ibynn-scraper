@@ -455,6 +455,7 @@ class WalmartScraper extends BaseScraper {
       console.log(`[OK] Done - ${products.length} total Walmart products`);
       return products;
     } catch (error) {
+      await this.logBrightDataSessionDiagnostics('Walmart search Bright Data session');
       throw new Error(`Walmart search failed for "${query}": ${error.message}`);
     } finally {
       if (page) {
@@ -498,6 +499,7 @@ class WalmartScraper extends BaseScraper {
         };
       });
     } catch (error) {
+      await this.logBrightDataSessionDiagnostics('Walmart product Bright Data session');
       throw new Error(`Failed to get Walmart product details for ${productId}: ${error.message}`);
     } finally {
       if (page) {

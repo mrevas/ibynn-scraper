@@ -246,6 +246,7 @@ class TargetScraper extends BaseScraper {
 
         console.log(`[OK] Page ${pageNum}: ${pageRaw.length} products (total so far: ${allRaw.length})`);
       } catch (error) {
+        await this.logBrightDataSessionDiagnostics('Target search Bright Data session');
         throw new Error(`Target search failed on page ${pageNum} for "${query}": ${error.message}`);
       } finally {
         if (tab) {
@@ -305,6 +306,7 @@ class TargetScraper extends BaseScraper {
       console.log('[OK] Product details retrieved');
       return details;
     } catch (error) {
+      await this.logBrightDataSessionDiagnostics('Target product Bright Data session');
       throw new Error(`Failed to get Target product details for ${productId}: ${error.message}`);
     } finally {
       if (page) {

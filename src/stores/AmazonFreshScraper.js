@@ -224,6 +224,43 @@ class AmazonFreshScraper extends BaseScraper {
     return null;
   }
 
+  async waitForPageSettled(page, timeout = 15000) {
+    await Promise.race([
+      page
+        .waitForNavigation({ waitUntil: 'domcontentloaded', timeout })
+        .catch(() => null),
+      page
+        .waitForFunction(() => document.readyState !== 'loading', { timeout })
+        .catch(() => null),
+      new Promise((resolve) => setTimeout(resolve, timeout))
+    ]);
+    await page.waitForSelector('body', { timeout: 10000 }).catch(() => null);
+    await humanDelay(1000, 2000);
+  }
+
+  async getStablePageDiagnostics(page, response = null, fallback = {}, attempts = 4) {
+    let diagnostics = null;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      diagnostics = await this.getPageDiagnostics(page, response, fallback);
+      if (!diagnostics.bodySnippet.includes('Execution context was destroyed')) {
+        return diagnostics;
+      }
+      await this.waitForPageSettled(page, 5000);
+    }
+    return diagnostics;
+  }
+
+  async getStableBodyText(page, attempts = 4) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const text = await page.evaluate(() => document.body?.innerText || '').catch(() => null);
+      if (text !== null) {
+        return text;
+      }
+      await this.waitForPageSettled(page, 5000);
+    }
+    return '';
+  }
+
   async establishFreshSession(page) {
     console.log(`[>] Amazon Fresh storefront: ${AMAZON_FRESH_URL}`);
     const response = await page.goto(AMAZON_FRESH_URL, {
@@ -286,21 +323,22 @@ class AmazonFreshScraper extends BaseScraper {
     await humanDelay(500, 1200);
 
     const updateButton = await this.getVisibleHandle(page, ZIP_UPDATE_SELECTOR);
+    const settlePromise = this.waitForPageSettled(page, 15000);
     if (updateButton) {
       await updateButton.click();
     } else {
       await page.keyboard.press('Enter');
     }
-
-    await humanDelay(1500, 3000);
+    await settlePromise;
 
     const doneButton = await this.getVisibleHandle(page, ZIP_DONE_SELECTOR);
     if (doneButton) {
+      const doneSettlePromise = this.waitForPageSettled(page, 10000);
       await doneButton.click().catch(() => null);
-      await humanDelay(800, 1600);
+      await doneSettlePromise;
     }
 
-    const diagnostics = await this.getPageDiagnostics(page, null, {
+    const diagnostics = await this.getStablePageDiagnostics(page, null, {
       cookieCount: await getCookieCount(page)
     });
     this.logNavigationDiagnostics('Amazon Fresh location', diagnostics);
@@ -312,7 +350,7 @@ class AmazonFreshScraper extends BaseScraper {
       );
     }
 
-    const updatedText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+    const updatedText = await this.getStableBodyText(page);
     if (!updatedText.includes(this.zipCode)) {
       throw new Error(
         `Amazon Fresh location did not update to ZIP ${this.zipCode}. ` +
@@ -488,6 +526,7 @@ class AmazonFreshScraper extends BaseScraper {
       console.log(`[OK] Done - ${products.length} total Amazon Fresh products`);
       return products;
     } catch (error) {
+      await this.logBrightDataSessionDiagnostics('Amazon Fresh search Bright Data session');
       throw new Error(`Amazon Fresh search failed for "${query}": ${error.message}`);
     } finally {
       if (page) {
@@ -532,6 +571,7 @@ class AmazonFreshScraper extends BaseScraper {
         };
       });
     } catch (error) {
+      await this.logBrightDataSessionDiagnostics('Amazon Fresh product Bright Data session');
       throw new Error(`Failed to get Amazon Fresh product details for ${productId}: ${error.message}`);
     } finally {
       if (page) {

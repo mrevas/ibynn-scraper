@@ -10,6 +10,7 @@ function readEnv(name) {
 
 const brightDataAuth = readEnv('BRIGHTDATA_AUTH');
 const brightDataBrowserWS = readEnv('BRIGHTDATA_BROWSER_WS');
+const brightDataApiKey = readEnv('BRIGHTDATA_API_KEY');
 
 /**
  * Configuration file for Target Scraper
@@ -35,6 +36,7 @@ module.exports = {
   },
 
   brightdata: {
+    apiKey: brightDataApiKey,
     auth: brightDataAuth || null,
     browserWSEndpoint:
       brightDataBrowserWS ||
