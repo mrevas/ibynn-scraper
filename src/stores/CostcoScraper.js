@@ -1,6 +1,12 @@
 const BaseScraper = require('./BaseScraper');
 const config = require('../../config');
 const { createBrowser, getBrowserProvider } = require('../browser');
+const {
+  applyPageHardening,
+  getCookieCount,
+  humanDelay,
+  maybeHandleManualChallenge
+} = require('../hardening');
 
 const COSTCO_HOME_URL = 'https://www.costco.com/';
 const SEARCH_URLS = [
@@ -20,6 +26,13 @@ class CostcoScraper extends BaseScraper {
       typeof options.headless === 'boolean' ? options.headless : config.browser.headless;
     this.timeout = options.timeout || config.browser.timeout;
     this.browserWSEndpoint = options.browserWSEndpoint;
+    this.slowMo = options.slowMo;
+    this.devtools = options.devtools;
+    this.userDataDir = options.userDataDir;
+    this.executablePath = options.executablePath;
+    this.userAgent =
+      typeof options.userAgent === 'string' ? options.userAgent : config.userAgent;
+    this.manualChallenge = options.manualChallenge;
   }
 
   getStepTimeout(maxTimeout = 20000) {
@@ -32,7 +45,11 @@ class CostcoScraper extends BaseScraper {
         provider: this.provider,
         headless: this.headless,
         timeout: this.timeout,
-        browserWSEndpoint: this.browserWSEndpoint
+        browserWSEndpoint: this.browserWSEndpoint,
+        slowMo: this.slowMo,
+        devtools: this.devtools,
+        userDataDir: this.userDataDir,
+        executablePath: this.executablePath
       });
       console.log(`[OK] Browser initialized (${this.provider})`);
     } catch (error) {
@@ -64,10 +81,10 @@ class CostcoScraper extends BaseScraper {
     }
 
     const page = await this.browser.newPage();
-    await page.setViewport({ width: 1366, height: 900 });
-    await page.setUserAgent(config.userAgent);
-    page.setDefaultNavigationTimeout(this.timeout);
-    page.setDefaultTimeout(this.timeout);
+    await applyPageHardening(page, {
+      timeout: this.timeout,
+      userAgent: this.userAgent
+    });
     return page;
   }
 
@@ -139,15 +156,6 @@ class CostcoScraper extends BaseScraper {
         page.off('requestfailed', onRequestFailed);
       }
     };
-  }
-
-  async getCookieCount(page) {
-    try {
-      const cookies = await page.cookies();
-      return cookies.length;
-    } catch (error) {
-      return null;
-    }
   }
 
   async getPageDiagnostics(page, response, fallback = {}) {
@@ -249,6 +257,27 @@ class CostcoScraper extends BaseScraper {
     });
   }
 
+  async hasProductResults(page) {
+    try {
+      return Boolean(await page.$(SEARCH_LINK_SELECTOR));
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async maybeHandleManualChallenge(page, diagnostics, stage) {
+    return maybeHandleManualChallenge({
+      page,
+      diagnostics,
+      stage,
+      storeName: this.storeName,
+      manualChallenge: this.manualChallenge,
+      getDiagnostics: this.getPageDiagnostics.bind(this),
+      logDiagnostics: this.logNavigationDiagnostics.bind(this),
+      hasResults: this.hasProductResults.bind(this)
+    });
+  }
+
   async establishSession(page) {
     const response = await page.goto(COSTCO_HOME_URL, {
       waitUntil: 'domcontentloaded',
@@ -257,12 +286,13 @@ class CostcoScraper extends BaseScraper {
     await page.waitForSelector('body', { timeout: this.timeout });
     await page.waitForSelector(HOMEPAGE_SEARCH_INPUT_SELECTOR, { timeout: this.timeout });
     await page.waitForNetworkIdle({ idleTime: 750, timeout: 5000 }).catch(() => null);
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await humanDelay(1200, 2400);
 
-    const diagnostics = await this.getPageDiagnostics(page, response, {
-      cookieCount: await this.getCookieCount(page)
+    let diagnostics = await this.getPageDiagnostics(page, response, {
+      cookieCount: await getCookieCount(page)
     });
     this.logNavigationDiagnostics('Costco homepage', diagnostics);
+    diagnostics = await this.maybeHandleManualChallenge(page, diagnostics, 'Costco homepage');
 
     if (diagnostics.blocked || diagnostics.verification) {
       throw new Error(
@@ -290,7 +320,7 @@ class CostcoScraper extends BaseScraper {
       });
 
     await page.waitForSelector('body', { timeout: 5000 }).catch(() => null);
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await humanDelay(1600, 3000);
 
     let selectorFound = false;
     try {
@@ -300,16 +330,17 @@ class CostcoScraper extends BaseScraper {
       selectorFound = false;
     }
 
-    const diagnostics = await this.getPageDiagnostics(page, response, {
+    let diagnostics = await this.getPageDiagnostics(page, response, {
       ...navigationProbe.events,
       navigationError,
-      cookieCount: await this.getCookieCount(page)
+      cookieCount: await getCookieCount(page)
     });
     navigationProbe.stop();
     diagnostics.selectorFound = selectorFound;
     this.logNavigationDiagnostics('Costco search', diagnostics);
+    diagnostics = await this.maybeHandleManualChallenge(page, diagnostics, 'Costco search');
 
-    if (selectorFound) {
+    if (diagnostics.selectorFound) {
       return diagnostics;
     }
 
@@ -341,7 +372,7 @@ class CostcoScraper extends BaseScraper {
     await page.click(HOMEPAGE_SEARCH_INPUT_SELECTOR, { clickCount: 3 });
     await page.keyboard.press('Backspace');
     await page.type(HOMEPAGE_SEARCH_INPUT_SELECTOR, query, { delay: 80 });
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await humanDelay(900, 1800);
 
     const stepTimeout = this.getStepTimeout(15000);
     const navigationProbe = this.trackSearchNavigation(page, query);
@@ -384,7 +415,7 @@ class CostcoScraper extends BaseScraper {
         .filter(Boolean)
         .join('; ');
     }
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await humanDelay(1600, 3000);
 
     let selectorFound = false;
     try {
@@ -394,15 +425,20 @@ class CostcoScraper extends BaseScraper {
       selectorFound = false;
     }
 
-    const diagnostics = await this.getPageDiagnostics(page, null, {
+    let diagnostics = await this.getPageDiagnostics(page, null, {
       ...navigationProbe.events,
       navigationError,
-      cookieCount: await this.getCookieCount(page)
+      cookieCount: await getCookieCount(page)
     });
     navigationProbe.stop();
     diagnostics.selectorFound = selectorFound;
     diagnostics.queryVisible = diagnostics.bodySnippet.toLowerCase().includes(query.toLowerCase());
     this.logNavigationDiagnostics('Costco homepage search', diagnostics);
+    diagnostics = await this.maybeHandleManualChallenge(
+      page,
+      diagnostics,
+      'Costco homepage search'
+    );
 
     const looksLikeSearchResults =
       !diagnostics.homepage &&
@@ -410,7 +446,7 @@ class CostcoScraper extends BaseScraper {
         diagnostics.finalUrl.toLowerCase().includes('/s?') ||
         diagnostics.queryVisible);
 
-    if ((selectorFound && looksLikeSearchResults) || diagnostics.noResults) {
+    if ((diagnostics.selectorFound && looksLikeSearchResults) || diagnostics.noResults) {
       return diagnostics;
     }
 
@@ -471,7 +507,7 @@ class CostcoScraper extends BaseScraper {
       timeout: this.timeout
     });
     await page.waitForSelector('body', { timeout: this.timeout });
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await humanDelay(1200, 2400);
 
     const diagnostics = await this.getPageDiagnostics(page, response);
     this.logNavigationDiagnostics('Costco product', diagnostics);

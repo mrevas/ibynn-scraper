@@ -67,7 +67,11 @@ async function createBrowser(options = {}) {
   if (provider === 'local') {
     return puppeteer.launch({
       headless: options.headless !== false,
-      args: config.browser.args
+      args: config.browser.args,
+      slowMo: options.slowMo ?? config.browser.slowMo,
+      devtools: options.devtools ?? config.browser.devtools,
+      userDataDir: options.userDataDir || config.browser.userDataDir || undefined,
+      executablePath: options.executablePath || config.browser.executablePath || undefined
     });
   }
 

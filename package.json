@@ -4,7 +4,10 @@
   "description": "A web scraper for Target search results with local and Bright Data browser support",
   "main": "src/scraper.js",
   "bin": {
-    "ibynn-scrape": "src/cli.js"
+    "ibynn-scrape": "src/cli.js",
+    "ibynn-amazon-fresh-scrape": "src/amazon-fresh-cli.js",
+    "ibynn-costco-scrape": "src/costco-cli.js",
+    "ibynn-walmart-scrape": "src/walmart-cli.js"
   },
   "files": [
     "src/",
@@ -16,6 +19,10 @@
     "test": "node examples/test.js",
     "advanced": "node examples/advanced.js",
     "batch": "node examples/batch.js",
+    "amazonfresh:scrape": "node src/amazon-fresh-cli.js",
+    "costco:local": "node examples/costco-local-headful.js",
+    "costco:scrape": "node src/costco-cli.js",
+    "walmart:scrape": "node src/walmart-cli.js",
     "debug": "node debug.js"
   },
   "keywords": [

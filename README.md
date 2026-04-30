@@ -1,6 +1,6 @@
 # Target Search Scraper
 
-A powerful, modular Node.js web scraper for Target.com and Costco.com product searches with support for both local Chromium and Bright Data Browser API sessions.
+A powerful, modular Node.js web scraper for Target.com, Costco.com, Walmart.com, and Amazon Fresh product searches with support for both local Chromium and Bright Data Browser API sessions.
 
 ## Features
 
@@ -84,6 +84,68 @@ const { getScraper } = require('./src/stores');
 const scraper = getScraper('costco');
 ```
 
+Amazon Fresh CLI:
+```bash
+npm run amazonfresh:scrape -- "milk" 10
+```
+
+Amazon Fresh defaults to ZIP `11435`. Override it with:
+```bash
+node src/amazon-fresh-cli.js "milk" 10 --zip=11435
+```
+
+Amazon Fresh local manual-challenge/headful mode:
+```bash
+node src/amazon-fresh-cli.js "milk" 10 --manual-challenge --user-agent=auto --user-data-dir=".chrome-amazonfresh-debug" --zip=11435
+```
+
+Costco CLI:
+```bash
+npm run costco:scrape -- "milk" 10
+```
+
+Costco local manual-challenge/headful mode:
+```bash
+node src/costco-cli.js "milk" 10 --manual-challenge --user-agent=auto --user-data-dir=".chrome-costco-debug"
+```
+
+Walmart CLI:
+```bash
+npm run walmart:scrape -- "milk" 10
+```
+
+Walmart local headful debugging:
+```bash
+node src/walmart-cli.js "milk" 10 --headful
+```
+
+Walmart with system Chrome and a persistent debug profile:
+```bash
+node src/walmart-cli.js "milk" 10 --headful --executable-path="C:\Program Files\Google\Chrome\Application\chrome.exe" --user-data-dir=".chrome-walmart-debug"
+```
+
+Walmart local manual-challenge mode:
+```bash
+node src/walmart-cli.js "milk" 10 --manual-challenge --user-agent=auto --user-data-dir=".chrome-walmart-debug"
+```
+
+When Amazon Fresh, Costco, or Walmart shows a challenge page, solve it in the opened browser, then press Enter in the terminal. The scraper will reuse the same browser/profile and continue extracting if the page reaches search results.
+
+The Costco and Walmart CLIs share these local hardening flags:
+```bash
+--headful
+--manual-challenge
+--user-agent=auto
+--slow-mo=75
+--user-data-dir=".chrome-store-debug"
+--executable-path="C:\Program Files\Google\Chrome\Application\chrome.exe"
+```
+
+Walmart Bright Data run:
+```bash
+TARGET_SCRAPER_PROVIDER=brightdata BRIGHTDATA_AUTH=username:password npm run walmart:scrape -- "milk" 10
+```
+
 Results are automatically saved to:
 ```
 results/target/{search_query}_{date}.json
@@ -140,6 +202,13 @@ const scraper = getScraper('target');
 
 // Get Costco scraper
 // const scraper = getScraper('costco');
+
+// Get Walmart scraper
+// const scraper = getScraper('walmart');
+
+// Get Amazon Fresh scraper
+// const scraper = getScraper('amazonfresh');
+// const scraper = getScraper('amazon fresh');
 ```
 
 ## Project Structure

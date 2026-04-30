@@ -6,6 +6,8 @@
 
 const TargetScraper = require('./TargetScraper');
 const CostcoScraper = require('./CostcoScraper');
+const WalmartScraper = require('./WalmartScraper');
+const AmazonFreshScraper = require('./AmazonFreshScraper');
 
 /**
  * Map of available stores
@@ -21,6 +23,16 @@ const STORES = {
     name: 'Costco',
     scraper: CostcoScraper,
     description: 'Costco.com product scraper'
+  },
+  walmart: {
+    name: 'Walmart',
+    scraper: WalmartScraper,
+    description: 'Walmart.com product scraper'
+  },
+  amazonfresh: {
+    name: 'Amazon Fresh',
+    scraper: AmazonFreshScraper,
+    description: 'Amazon Fresh product scraper'
   }
   // Future stores:
   // amazon: { name: 'Amazon', scraper: AmazonScraper, ... },
@@ -34,8 +46,12 @@ const STORES = {
  * @param {object} options - Options to pass to scraper
  * @returns {Object} Scraper instance
  */
+function normalizeStoreName(storeName) {
+  return storeName.toLowerCase().replace(/[\s_-]+/g, '');
+}
+
 function getScraper(storeName = 'target', options = {}) {
-  const store = STORES[storeName.toLowerCase()];
+  const store = STORES[normalizeStoreName(storeName)];
   if (!store) {
     throw new Error(
       `Unknown store: ${storeName}. Available stores: ${Object.keys(STORES).join(', ')}`

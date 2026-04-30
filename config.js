@@ -23,11 +23,15 @@ module.exports = {
     headless: process.env.TARGET_SCRAPER_HEADLESS
       ? process.env.TARGET_SCRAPER_HEADLESS !== 'false'
       : true,
+    slowMo: parseNumber(process.env.TARGET_SCRAPER_SLOW_MO, 0),
+    devtools: process.env.TARGET_SCRAPER_DEVTOOLS === 'true',
+    userDataDir: readEnv('TARGET_SCRAPER_USER_DATA_DIR'),
+    executablePath: readEnv('TARGET_SCRAPER_EXECUTABLE_PATH'),
     timeout: parseNumber(
       process.env.TARGET_SCRAPER_TIMEOUT || process.env.TARGET_SCRAPER_TIMEOUT_MS,
       60000
     ),
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
   },
 
   brightdata: {
@@ -83,8 +87,9 @@ module.exports = {
     }
   },
 
-  // User agent to use
+  // User agent to use. Set TARGET_SCRAPER_USER_AGENT=auto to keep the browser default.
   userAgent:
+    readEnv('TARGET_SCRAPER_USER_AGENT') ||
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
 
   // Request delay (in ms) for polite scraping
