@@ -11,6 +11,8 @@ const {
 const AMAZON_FRESH_URL =
   'https://www.amazon.com/alm/storefront?almBrandId=QW1hem9uIEZyZXNo';
 const DEFAULT_ZIP_CODE = '11435';
+const DEFAULT_ACCEPTABLE_ZIP_PREFIXES = ['111', '113', '114', '116'];
+const DEFAULT_ACCEPTABLE_ZIP_CODES = ['11004', '11005'];
 const PRODUCT_SELECTOR = '[data-component-type="s-search-result"][data-asin]';
 const PRODUCT_LINK_SELECTOR =
   '[data-component-type="s-search-result"] a[href*="/dp/"], [data-component-type="s-search-result"] a[href*="/gp/product/"]';
@@ -37,6 +39,23 @@ const LOCATION_STATUS_SELECTOR = [
 const ZIP_CONFIRMATION_RETRY_LIMIT = 4;
 const SEARCH_NAVIGATION_RETRY_LIMIT = 3;
 
+function normalizeZipCode(value) {
+  const match = String(value || '').match(/\d{5}/);
+  return match ? match[0] : null;
+}
+
+function normalizeZipList(values, fallback = []) {
+  const source =
+    Array.isArray(values)
+      ? values
+      : typeof values === 'string'
+        ? values.split(',')
+        : fallback;
+  return source
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+}
+
 class AmazonFreshScraper extends BaseScraper {
   constructor(options = {}) {
     super('Amazon Fresh', options);
@@ -52,7 +71,19 @@ class AmazonFreshScraper extends BaseScraper {
     this.userAgent =
       typeof options.userAgent === 'string' ? options.userAgent : config.userAgent;
     this.manualChallenge = options.manualChallenge;
-    this.zipCode = options.zipCode || process.env.AMAZON_FRESH_ZIP || DEFAULT_ZIP_CODE;
+    this.zipCode =
+      normalizeZipCode(options.zipCode) ||
+      normalizeZipCode(config.amazonFresh?.zipCode) ||
+      DEFAULT_ZIP_CODE;
+    this.acceptableZipPrefixes = normalizeZipList(
+      options.acceptableZipPrefixes || config.amazonFresh?.acceptableZipPrefixes,
+      DEFAULT_ACCEPTABLE_ZIP_PREFIXES
+    );
+    this.acceptableZipCodes = normalizeZipList(
+      options.acceptableZipCodes || config.amazonFresh?.acceptableZipCodes,
+      DEFAULT_ACCEPTABLE_ZIP_CODES
+    );
+    this.confirmedZipCode = null;
   }
 
   async init() {
@@ -131,6 +162,46 @@ class AmazonFreshScraper extends BaseScraper {
       normalized.includes('context was destroyed') ||
       normalized.includes('detached frame')
     );
+  }
+
+  extractZipCodes(text = '') {
+    const matches = String(text || '').match(/\b\d{5}(?:-\d{4})?\b/g) || [];
+    return [...new Set(matches.map((zip) => zip.slice(0, 5)))];
+  }
+
+  isAcceptableZip(zip) {
+    const normalizedZip = normalizeZipCode(zip);
+    if (!normalizedZip) {
+      return false;
+    }
+
+    return (
+      this.acceptableZipCodes.includes(normalizedZip) ||
+      this.acceptableZipPrefixes.some((prefix) => normalizedZip.startsWith(prefix))
+    );
+  }
+
+  findAcceptedZip(text = '') {
+    return this.findAcceptedZipFromCodes(this.extractZipCodes(text));
+  }
+
+  findAcceptedZipFromCodes(zipCodes = []) {
+    return zipCodes.find((zip) => this.isAcceptableZip(zip)) || null;
+  }
+
+  getAcceptableZipDescription() {
+    return (
+      `prefixes=${this.acceptableZipPrefixes.join(',')} ` +
+      `exact=${this.acceptableZipCodes.join(',')}`
+    );
+  }
+
+  recordConfirmedZip(locationState = {}) {
+    const confirmedZip = locationState.acceptedZipCode || null;
+    if (confirmedZip) {
+      this.confirmedZipCode = confirmedZip;
+    }
+    return confirmedZip;
   }
 
   isBlankPageDiagnostics(diagnostics = {}) {
@@ -223,8 +294,13 @@ class AmazonFreshScraper extends BaseScraper {
       bouncedToStorefront: diagnostics.bouncedToStorefront,
       urlMatchesSearch: diagnostics.urlMatchesSearch,
       zipConfirmed: diagnostics.zipConfirmed,
+      acceptedZipCode: diagnostics.acceptedZipCode,
+      confirmedZipCode: diagnostics.confirmedZipCode,
+      acceptableZipRules: diagnostics.acceptableZipRules,
       locationHasZip: diagnostics.locationHasZip,
       bodyHasZip: diagnostics.bodyHasZip,
+      locationZipCodes: diagnostics.locationZipCodes,
+      bodyZipCodes: diagnostics.bodyZipCodes,
       popoverOpen: diagnostics.popoverOpen,
       retrying: diagnostics.retrying,
       retryReason: diagnostics.retryReason,
@@ -347,10 +423,13 @@ class AmazonFreshScraper extends BaseScraper {
   }
 
   async getLocationConfirmationState(page) {
-    return page
+    const state = await page
       .evaluate(
-        ({ zipCode, locationSelector, zipInputSelector, zipDoneSelector }) => {
+        ({ locationSelector, zipInputSelector, zipDoneSelector }) => {
           const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
+          const extractZipCodes = (text) => [
+            ...new Set(((text || '').match(/\b\d{5}(?:-\d{4})?\b/g) || []).map((zip) => zip.slice(0, 5)))
+          ];
           const isVisible = (el) => {
             if (!el) {
               return false;
@@ -379,15 +458,13 @@ class AmazonFreshScraper extends BaseScraper {
 
           return {
             locationText: locationTexts.slice(0, 6).join(' | ').slice(0, 300),
-            locationHasZip: locationTexts.some((text) => text.includes(zipCode)),
-            bodyHasZip: bodyText.includes(zipCode),
+            locationZipCodes: [...new Set(locationTexts.flatMap((text) => extractZipCodes(text)))],
+            bodyZipCodes: extractZipCodes(bodyText),
             zipInputValue,
-            zipInputHasZip: zipInputValue.includes(zipCode),
             popoverOpen: zipInputVisible || doneButtonVisible
           };
         },
         {
-          zipCode: this.zipCode,
           locationSelector: LOCATION_STATUS_SELECTOR,
           zipInputSelector: ZIP_INPUT_SELECTOR,
           zipDoneSelector: ZIP_DONE_SELECTOR
@@ -395,6 +472,8 @@ class AmazonFreshScraper extends BaseScraper {
       )
       .catch((error) => ({
         locationText: '',
+        locationZipCodes: [],
+        bodyZipCodes: [],
         locationHasZip: false,
         bodyHasZip: false,
         zipInputValue: '',
@@ -403,12 +482,24 @@ class AmazonFreshScraper extends BaseScraper {
         readError: error.message,
         executionContextUnstable: this.isTransientExecutionErrorMessage(error.message)
       }));
+
+    const locationAcceptedZip = this.findAcceptedZipFromCodes(state.locationZipCodes || []);
+    const bodyAcceptedZip = this.findAcceptedZipFromCodes(state.bodyZipCodes || []);
+    const acceptedZipCode = locationAcceptedZip || (!state.popoverOpen ? bodyAcceptedZip : null);
+
+    return {
+      ...state,
+      acceptedZipCode,
+      confirmedZipCode: this.confirmedZipCode,
+      acceptableZipRules: this.getAcceptableZipDescription(),
+      locationHasZip: Boolean(locationAcceptedZip),
+      bodyHasZip: Boolean(bodyAcceptedZip),
+      zipInputHasZip: String(state.zipInputValue || '').includes(this.zipCode)
+    };
   }
 
   isLocationConfirmed(locationState = {}) {
-    return Boolean(
-      locationState.locationHasZip || (locationState.bodyHasZip && !locationState.popoverOpen)
-    );
+    return Boolean(locationState.acceptedZipCode);
   }
 
   async waitForProductResults(page, primaryTimeout = 16000, secondaryTimeout = 10000) {
@@ -481,14 +572,17 @@ class AmazonFreshScraper extends BaseScraper {
 
       if (finalDiagnostics.signInRequired) {
         throw new Error(
-          `Amazon Fresh appears to require sign-in or delivery eligibility for ZIP ${this.zipCode}. ` +
+          `Amazon Fresh appears to require sign-in or delivery eligibility for preferred ZIP ${this.zipCode}. ` +
             `finalUrl=${finalDiagnostics.finalUrl} title="${finalDiagnostics.title}" ` +
             `body="${finalDiagnostics.bodySnippet}" location="${finalDiagnostics.locationText || 'n/a'}"`
         );
       }
 
       if (finalDiagnostics.zipConfirmed) {
-        console.log(`[OK] Amazon Fresh location set to ZIP ${this.zipCode}`);
+        const confirmedZip = this.recordConfirmedZip(finalDiagnostics);
+        console.log(
+          `[OK] Amazon Fresh location accepted at ZIP ${confirmedZip || this.confirmedZipCode || 'unknown'}`
+        );
         return finalDiagnostics;
       }
 
@@ -517,8 +611,13 @@ class AmazonFreshScraper extends BaseScraper {
     }
 
     throw new Error(
-      `Amazon Fresh location did not update to ZIP ${this.zipCode}. ` +
+      `Amazon Fresh location did not confirm an acceptable Queens ZIP after submitting preferred ZIP ${this.zipCode}. ` +
+        `acceptable=${this.getAcceptableZipDescription()} ` +
         `finalUrl=${lastDiagnostics?.finalUrl || page.url()} title="${lastDiagnostics?.title || ''}" ` +
+        `detectedZips=${[
+          ...(lastDiagnostics?.locationZipCodes || []),
+          ...(lastDiagnostics?.bodyZipCodes || [])
+        ].join(',') || 'none'} ` +
         `body="${lastDiagnostics?.bodySnippet || ''}" location="${lastDiagnostics?.locationText || 'n/a'}"`
     );
   }
@@ -556,11 +655,15 @@ class AmazonFreshScraper extends BaseScraper {
   async setDeliveryLocation(page) {
     const currentLocationState = await this.getLocationConfirmationState(page);
     if (this.isLocationConfirmed(currentLocationState)) {
-      console.log(`[OK] Amazon Fresh location already appears set to ${this.zipCode}`);
+      const confirmedZip = this.recordConfirmedZip(currentLocationState);
+      console.log(`[OK] Amazon Fresh location already acceptable at ZIP ${confirmedZip}`);
       return;
     }
 
-    console.log(`[>] Setting Amazon Fresh delivery location to ZIP ${this.zipCode}`);
+    console.log(
+      `[>] Setting Amazon Fresh delivery location to preferred ZIP ${this.zipCode} ` +
+        `(${this.getAcceptableZipDescription()})`
+    );
 
     const locationLink = await this.getVisibleHandle(page, LOCATION_LINK_SELECTOR);
     if (!locationLink) {
@@ -673,6 +776,9 @@ class AmazonFreshScraper extends BaseScraper {
         urlMatchesSearch: this.isAmazonFreshSearchUrl(enrichedDiagnostics.finalUrl),
         zipConfirmed: this.isLocationConfirmed(refreshedLocationState)
       };
+      if (enrichedDiagnostics.zipConfirmed) {
+        this.recordConfirmedZip(enrichedDiagnostics);
+      }
       if (needsManualChallenge) {
         this.logNavigationDiagnostics('Amazon Fresh search after challenge', enrichedDiagnostics);
       }
@@ -687,7 +793,7 @@ class AmazonFreshScraper extends BaseScraper {
 
       if (enrichedDiagnostics.signInRequired) {
         throw new Error(
-          `Amazon Fresh appears to require sign-in or delivery eligibility for ZIP ${this.zipCode}. ` +
+          `Amazon Fresh appears to require sign-in or delivery eligibility for preferred ZIP ${this.zipCode}. ` +
             `finalUrl=${enrichedDiagnostics.finalUrl} title="${enrichedDiagnostics.title}" ` +
             `body="${enrichedDiagnostics.bodySnippet}"`
         );
@@ -746,6 +852,7 @@ class AmazonFreshScraper extends BaseScraper {
         `finalUrl=${lastDiagnostics?.finalUrl || page.url()} title="${lastDiagnostics?.title || ''}" ` +
         `bouncedToStorefront=${lastDiagnostics?.bouncedToStorefront ? 'yes' : 'no'} ` +
         `zipConfirmed=${lastDiagnostics?.zipConfirmed ? 'yes' : 'no'} ` +
+        `confirmedZip=${this.confirmedZipCode || 'none'} ` +
         `navigationError=${lastDiagnostics?.navigationError || 'none'} ` +
         `body="${lastDiagnostics?.bodySnippet || ''}"`
     );
@@ -760,7 +867,10 @@ class AmazonFreshScraper extends BaseScraper {
       page = await this.getPage();
       console.log('amazon fresh scraper config', {
         provider: this.provider,
-        zipCode: this.zipCode,
+        preferredZipCode: this.zipCode,
+        confirmedZipCode: this.confirmedZipCode,
+        acceptableZipPrefixes: this.acceptableZipPrefixes,
+        acceptableZipCodes: this.acceptableZipCodes,
         hasAuth: Boolean(config.brightdata.auth),
         browserWSEndpoint: this.browserWSEndpoint || config.brightdata.browserWSEndpoint
           ? 'configured'
@@ -837,7 +947,7 @@ class AmazonFreshScraper extends BaseScraper {
           extracted_price: product.extractedPrice,
           rating: product.rating,
           reviews: product.reviews,
-          extensions: [`zip:${this.zipCode}`],
+          extensions: [`zip:${this.confirmedZipCode || this.zipCode}`],
           thumbnail: product.thumbnail,
           primary_offer:
             product.extractedPrice != null ? { offer_price: product.extractedPrice } : null,

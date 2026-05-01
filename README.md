@@ -96,10 +96,21 @@ Amazon Fresh CLI:
 npm run amazonfresh:scrape -- "milk" 10
 ```
 
-Amazon Fresh defaults to ZIP `11435`. Override it with:
+Amazon Fresh submits preferred ZIP `11435` by default, then accepts any configured Queens ZIP match.
+Override the preferred ZIP with:
 ```bash
 node src/amazon-fresh-cli.js "milk" 10 --zip=11435
 ```
+
+Amazon Fresh acceptable Queens ZIP rules:
+```bash
+AMAZON_FRESH_ZIP=11435
+AMAZON_FRESH_ACCEPTABLE_ZIP_PREFIXES=111,113,114,116
+AMAZON_FRESH_ACCEPTABLE_ZIP_CODES=11004,11005
+```
+
+The preferred ZIP is what the scraper submits first. Confirmation succeeds if Amazon resolves the
+location to any ZIP matching the acceptable prefixes or exact ZIP list.
 
 Amazon Fresh local manual-challenge/headful mode:
 ```bash

@@ -8,6 +8,17 @@ function readEnv(name) {
   return value && value.trim() ? value.trim() : null;
 }
 
+function parseList(value, fallback = []) {
+  if (!value) {
+    return fallback;
+  }
+
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 const brightDataAuth = readEnv('BRIGHTDATA_AUTH');
 const brightDataBrowserWS = readEnv('BRIGHTDATA_BROWSER_WS');
 const brightDataApiKey = readEnv('BRIGHTDATA_API_KEY');
@@ -41,6 +52,18 @@ module.exports = {
     browserWSEndpoint:
       brightDataBrowserWS ||
       (brightDataAuth ? `wss://${brightDataAuth}@brd.superproxy.io:9222` : null)
+  },
+
+  amazonFresh: {
+    zipCode: readEnv('AMAZON_FRESH_ZIP') || '11435',
+    acceptableZipPrefixes: parseList(
+      readEnv('AMAZON_FRESH_ACCEPTABLE_ZIP_PREFIXES'),
+      ['111', '113', '114', '116']
+    ),
+    acceptableZipCodes: parseList(
+      readEnv('AMAZON_FRESH_ACCEPTABLE_ZIP_CODES'),
+      ['11004', '11005']
+    )
   },
 
   // Default search settings

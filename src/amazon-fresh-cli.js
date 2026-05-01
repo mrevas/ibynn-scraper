@@ -42,6 +42,8 @@ Provider env:
   BRIGHTDATA_API_KEY=your_brightdata_api_key
   TARGET_SCRAPER_HEADLESS=false
   AMAZON_FRESH_ZIP=11435
+  AMAZON_FRESH_ACCEPTABLE_ZIP_PREFIXES=111,113,114,116
+  AMAZON_FRESH_ACCEPTABLE_ZIP_CODES=11004,11005
 
 Amazon Fresh flags:
   --zip=11435
@@ -61,7 +63,9 @@ ${getCommonHelpFlags()}
     console.log('\nStarting Amazon Fresh Search Scraper\n');
     console.log('Store: Amazon Fresh');
     console.log(`Provider: ${provider}`);
-    console.log(`ZIP: ${zipCode}`);
+    console.log(`Preferred ZIP: ${zipCode}`);
+    console.log(`Acceptable ZIP prefixes: ${scraper.acceptableZipPrefixes.join(',')}`);
+    console.log(`Acceptable exact ZIPs: ${scraper.acceptableZipCodes.join(',')}`);
     console.log(`Search term: "${query}"`);
     console.log(`Max results: ${limit}\n`);
 

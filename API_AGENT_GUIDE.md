@@ -18,7 +18,8 @@ prefer `amazonfresh`.
 
 ## Amazon Fresh
 
-Amazon Fresh requires a delivery ZIP. Default to `11435`.
+Amazon Fresh requires a delivery ZIP. Submit preferred ZIP `11435` by default,
+but treat any acceptable Queens ZIP as valid after Amazon resolves the location.
 
 Provider wrapper:
 
@@ -48,7 +49,17 @@ async function searchAmazonFresh(query, limit = 10) {
   const scraper = getScraper(
     'amazonfresh',
     buildBrowserOptions({
-      zipCode: process.env.AMAZON_FRESH_ZIP || '11435'
+      zipCode: process.env.AMAZON_FRESH_ZIP || '11435',
+      acceptableZipPrefixes:
+        (process.env.AMAZON_FRESH_ACCEPTABLE_ZIP_PREFIXES || '111,113,114,116')
+          .split(',')
+          .map((zip) => zip.trim())
+          .filter(Boolean),
+      acceptableZipCodes:
+        (process.env.AMAZON_FRESH_ACCEPTABLE_ZIP_CODES || '11004,11005')
+          .split(',')
+          .map((zip) => zip.trim())
+          .filter(Boolean)
     })
   );
 
@@ -79,7 +90,7 @@ app.get('/amazon-fresh-search', async (req, res) => {
     res.json({
       store: 'amazonfresh',
       query,
-      zipCode: process.env.AMAZON_FRESH_ZIP || '11435',
+      preferredZipCode: process.env.AMAZON_FRESH_ZIP || '11435',
       products
     });
   } catch (error) {
@@ -99,6 +110,8 @@ Required for Bright Data:
 TARGET_SCRAPER_PROVIDER=brightdata
 BRIGHTDATA_AUTH=username:password
 AMAZON_FRESH_ZIP=11435
+AMAZON_FRESH_ACCEPTABLE_ZIP_PREFIXES=111,113,114,116
+AMAZON_FRESH_ACCEPTABLE_ZIP_CODES=11004,11005
 TARGET_SCRAPER_TIMEOUT=60000
 ```
 
@@ -111,6 +124,11 @@ TARGET_SCRAPER_TIMEOUT_MS=60000
 ```
 
 `BRIGHTDATA_BROWSER_WS` overrides the endpoint derived from `BRIGHTDATA_AUTH`.
+
+For Amazon Fresh, `AMAZON_FRESH_ZIP` is the preferred ZIP submitted first.
+Location confirmation accepts extracted 5-digit ZIPs that either start with
+`111`, `113`, `114`, or `116`, or exactly match `11004` or `11005`. Do not use
+the broad `110` prefix, since it includes non-Queens ZIPs.
 
 ## Hardening Features
 
@@ -194,6 +212,10 @@ All stores preserve this product shape:
 }
 ```
 
+For Amazon Fresh, `extensions` includes `zip:<confirmedZip>` when the page
+confirms an acceptable ZIP. If no confirmed ZIP was detected before extraction,
+it falls back to the preferred ZIP.
+
 ## API Agent Checklist
 
 1. Update/reinstall `ibynn-target-scraper` in the API repo.
@@ -201,6 +223,6 @@ All stores preserve this product shape:
 3. Add `/amazon-fresh-search?query=milk&limit=10`.
 4. Return `400` for missing query.
 5. Default limit to `10`.
-6. Default ZIP to `11435`.
+6. Default preferred ZIP to `11435`, but accept configured Queens ZIP matches.
 7. Always call `await scraper.close()` in `finally`.
 8. Restart the API process after env or package updates.
