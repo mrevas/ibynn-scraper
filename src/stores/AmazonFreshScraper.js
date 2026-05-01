@@ -20,6 +20,22 @@ const ZIP_INPUT_SELECTOR = '#GLUXZipUpdateInput, input[name="zipCode"]';
 const ZIP_UPDATE_SELECTOR = '#GLUXZipUpdate, input[aria-labelledby="GLUXZipUpdate-announce"]';
 const ZIP_DONE_SELECTOR =
   '#GLUXConfirmClose, input[name="glowDoneButton"], button[name="glowDoneButton"], .a-popover-footer button';
+const LOCATION_STATUS_SELECTOR = [
+  LOCATION_LINK_SELECTOR,
+  '#glow-ingress-line1',
+  '#glow-ingress-line2',
+  '#glow-ingress-line1 span',
+  '#glow-ingress-line2 span',
+  '#GLUXZipConfirmationValue',
+  '#GLUXZipConfirmationValue span',
+  '#GLUXDisplayAddressValue',
+  '#GLUXDisplayAddressValue span',
+  '[data-action-type="LOCATION"]',
+  '[aria-label*="Deliver to"]',
+  '[aria-label*="delivery"]'
+].join(', ');
+const ZIP_CONFIRMATION_RETRY_LIMIT = 4;
+const SEARCH_NAVIGATION_RETRY_LIMIT = 3;
 
 class AmazonFreshScraper extends BaseScraper {
   constructor(options = {}) {
@@ -95,6 +111,34 @@ class AmazonFreshScraper extends BaseScraper {
     return 'Amazon Fresh blocked the local browser session. Bright Data mode may be required for Amazon Fresh.';
   }
 
+  isAmazonFreshStorefrontUrl(url = '') {
+    return typeof url === 'string' && url.includes('/alm/storefront');
+  }
+
+  isAmazonFreshSearchUrl(url = '') {
+    return (
+      typeof url === 'string' &&
+      url.includes('/s?') &&
+      (url.includes('i=amazonfresh') || url.includes('almBrandId=QW1hem9uIEZyZXNo'))
+    );
+  }
+
+  isTransientExecutionErrorMessage(message = '') {
+    const normalized = String(message || '').toLowerCase();
+    return (
+      normalized.includes('execution context was destroyed') ||
+      normalized.includes('cannot find context with specified id') ||
+      normalized.includes('context was destroyed') ||
+      normalized.includes('detached frame')
+    );
+  }
+
+  isBlankPageDiagnostics(diagnostics = {}) {
+    const title = String(diagnostics.title || '').trim();
+    const bodySnippet = String(diagnostics.bodySnippet || '').trim();
+    return !title && !bodySnippet;
+  }
+
   async getPageDiagnostics(page, response, fallback = {}) {
     const responseStatus =
       response && typeof response.status === 'function' ? response.status() : null;
@@ -108,7 +152,8 @@ class AmazonFreshScraper extends BaseScraper {
         return {
           status: currentStatus,
           finalUrl: window.location.href,
-          title: document.title,
+          title: document.title || '',
+          readyState: document.readyState || '',
           blocked:
             normalized.includes('captcha') ||
             normalized.includes('enter the characters you see below') ||
@@ -129,6 +174,9 @@ class AmazonFreshScraper extends BaseScraper {
             normalized.includes('no results') ||
             normalized.includes('did not match') ||
             normalized.includes('try checking your spelling'),
+          bodyLength: text.replace(/\s+/g, ' ').trim().length,
+          readError: null,
+          executionContextUnstable: false,
           bodySnippet: text.replace(/\s+/g, ' ').trim().slice(0, 300),
           htmlSnippet: html.replace(/\s+/g, ' ').trim().slice(0, 300)
         };
@@ -136,11 +184,15 @@ class AmazonFreshScraper extends BaseScraper {
       .catch((error) => ({
         status,
         finalUrl: page.url(),
-        title: 'N/A',
+        title: '',
+        readyState: 'unavailable',
         blocked: false,
         verification: false,
         signInRequired: false,
         noResults: false,
+        bodyLength: 0,
+        readError: error.message,
+        executionContextUnstable: this.isTransientExecutionErrorMessage(error.message),
         bodySnippet: `Unable to read page body: ${error.message}`,
         htmlSnippet: ''
       }));
@@ -158,12 +210,28 @@ class AmazonFreshScraper extends BaseScraper {
       status: diagnostics.status,
       finalUrl: diagnostics.finalUrl,
       title: diagnostics.title,
+      readyState: diagnostics.readyState,
       blocked: diagnostics.blocked,
       verification: diagnostics.verification,
       signInRequired: diagnostics.signInRequired,
       noResults: diagnostics.noResults,
+      bodyLength: diagnostics.bodyLength,
+      readError: diagnostics.readError,
+      executionContextUnstable: diagnostics.executionContextUnstable,
+      blankPage: diagnostics.blankPage,
+      selectorFound: diagnostics.selectorFound,
+      bouncedToStorefront: diagnostics.bouncedToStorefront,
+      urlMatchesSearch: diagnostics.urlMatchesSearch,
+      zipConfirmed: diagnostics.zipConfirmed,
+      locationHasZip: diagnostics.locationHasZip,
+      bodyHasZip: diagnostics.bodyHasZip,
+      popoverOpen: diagnostics.popoverOpen,
+      retrying: diagnostics.retrying,
+      retryReason: diagnostics.retryReason,
+      attempt: diagnostics.attempt,
       navigationError: diagnostics.navigationError,
       cookieCount: diagnostics.cookieCount,
+      locationText: diagnostics.locationText,
       bodySnippet: diagnostics.bodySnippet
     });
   }
@@ -235,6 +303,19 @@ class AmazonFreshScraper extends BaseScraper {
       new Promise((resolve) => setTimeout(resolve, timeout))
     ]);
     await page.waitForSelector('body', { timeout: 10000 }).catch(() => null);
+    await page
+      .waitForFunction(
+        () => {
+          const body = document.body;
+          if (!body) {
+            return false;
+          }
+          const text = (body.innerText || '').trim();
+          return document.readyState === 'complete' || text.length > 0 || body.children.length > 0;
+        },
+        { timeout: Math.min(timeout, 8000) }
+      )
+      .catch(() => null);
     await humanDelay(1000, 2000);
   }
 
@@ -242,10 +323,14 @@ class AmazonFreshScraper extends BaseScraper {
     let diagnostics = null;
     for (let attempt = 0; attempt < attempts; attempt++) {
       diagnostics = await this.getPageDiagnostics(page, response, fallback);
-      if (!diagnostics.bodySnippet.includes('Execution context was destroyed')) {
+      diagnostics.blankPage = this.isBlankPageDiagnostics(diagnostics);
+      if (!diagnostics.executionContextUnstable && !diagnostics.blankPage) {
         return diagnostics;
       }
       await this.waitForPageSettled(page, 5000);
+    }
+    if (diagnostics) {
+      diagnostics.blankPage = this.isBlankPageDiagnostics(diagnostics);
     }
     return diagnostics;
   }
@@ -253,12 +338,189 @@ class AmazonFreshScraper extends BaseScraper {
   async getStableBodyText(page, attempts = 4) {
     for (let attempt = 0; attempt < attempts; attempt++) {
       const text = await page.evaluate(() => document.body?.innerText || '').catch(() => null);
-      if (text !== null) {
+      if (typeof text === 'string' && text.trim()) {
         return text;
       }
       await this.waitForPageSettled(page, 5000);
     }
     return '';
+  }
+
+  async getLocationConfirmationState(page) {
+    return page
+      .evaluate(
+        ({ zipCode, locationSelector, zipInputSelector, zipDoneSelector }) => {
+          const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
+          const isVisible = (el) => {
+            if (!el) {
+              return false;
+            }
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return (
+              rect.width > 0 &&
+              rect.height > 0 &&
+              style.visibility !== 'hidden' &&
+              style.display !== 'none'
+            );
+          };
+          const locationTexts = [...document.querySelectorAll(locationSelector)]
+            .map((el) => clean(el.innerText || el.textContent || el.getAttribute('aria-label') || ''))
+            .filter(Boolean);
+          const bodyText = clean(document.body?.innerText || '');
+          const zipInput = document.querySelector(zipInputSelector);
+          const zipInputValue = clean(
+            zipInput?.value || zipInput?.getAttribute('value') || zipInput?.textContent || ''
+          );
+          const zipInputVisible = Boolean(zipInput && isVisible(zipInput));
+          const doneButtonVisible = [...document.querySelectorAll(zipDoneSelector)].some((el) =>
+            isVisible(el)
+          );
+
+          return {
+            locationText: locationTexts.slice(0, 6).join(' | ').slice(0, 300),
+            locationHasZip: locationTexts.some((text) => text.includes(zipCode)),
+            bodyHasZip: bodyText.includes(zipCode),
+            zipInputValue,
+            zipInputHasZip: zipInputValue.includes(zipCode),
+            popoverOpen: zipInputVisible || doneButtonVisible
+          };
+        },
+        {
+          zipCode: this.zipCode,
+          locationSelector: LOCATION_STATUS_SELECTOR,
+          zipInputSelector: ZIP_INPUT_SELECTOR,
+          zipDoneSelector: ZIP_DONE_SELECTOR
+        }
+      )
+      .catch((error) => ({
+        locationText: '',
+        locationHasZip: false,
+        bodyHasZip: false,
+        zipInputValue: '',
+        zipInputHasZip: false,
+        popoverOpen: false,
+        readError: error.message,
+        executionContextUnstable: this.isTransientExecutionErrorMessage(error.message)
+      }));
+  }
+
+  isLocationConfirmed(locationState = {}) {
+    return Boolean(
+      locationState.locationHasZip || (locationState.bodyHasZip && !locationState.popoverOpen)
+    );
+  }
+
+  async waitForProductResults(page, primaryTimeout = 16000, secondaryTimeout = 10000) {
+    try {
+      await page.waitForSelector(PRODUCT_LINK_SELECTOR, { timeout: primaryTimeout });
+      return true;
+    } catch (error) {
+      if (!this.isTransientExecutionErrorMessage(error.message)) {
+        await this.waitForPageSettled(page, Math.min(secondaryTimeout, 8000));
+      } else {
+        await this.waitForPageSettled(page, 5000);
+      }
+    }
+
+    try {
+      await page.waitForSelector(PRODUCT_LINK_SELECTOR, { timeout: secondaryTimeout });
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async confirmDeliveryLocation(page) {
+    let lastDiagnostics = null;
+
+    for (let attempt = 1; attempt <= ZIP_CONFIRMATION_RETRY_LIMIT; attempt++) {
+      if (attempt > 1) {
+        await this.waitForPageSettled(page, 7000);
+      }
+
+      const diagnostics = await this.getStablePageDiagnostics(page, null, {
+        cookieCount: await getCookieCount(page)
+      });
+      const locationState = await this.getLocationConfirmationState(page);
+      const enrichedDiagnostics = {
+        ...diagnostics,
+        ...locationState,
+        attempt,
+        blankPage: this.isBlankPageDiagnostics(diagnostics),
+        zipConfirmed: this.isLocationConfirmed(locationState)
+      };
+
+      this.logNavigationDiagnostics('Amazon Fresh ZIP confirmation', enrichedDiagnostics);
+
+      let finalDiagnostics = enrichedDiagnostics;
+      if (finalDiagnostics.blocked || finalDiagnostics.verification) {
+        finalDiagnostics = await this.maybeHandleManualChallenge(
+          page,
+          finalDiagnostics,
+          'Amazon Fresh location'
+        );
+        const refreshedLocationState = await this.getLocationConfirmationState(page);
+        finalDiagnostics = {
+          ...finalDiagnostics,
+          ...refreshedLocationState,
+          attempt,
+          blankPage: this.isBlankPageDiagnostics(finalDiagnostics),
+          zipConfirmed: this.isLocationConfirmed(refreshedLocationState)
+        };
+        this.logNavigationDiagnostics('Amazon Fresh ZIP confirmation after challenge', finalDiagnostics);
+      }
+
+      if (finalDiagnostics.blocked || finalDiagnostics.verification) {
+        throw new Error(
+          `${this.getProviderSpecificBlockHint()} Location setup was blocked. ` +
+            `finalUrl=${finalDiagnostics.finalUrl} title="${finalDiagnostics.title}" ` +
+            `body="${finalDiagnostics.bodySnippet}" location="${finalDiagnostics.locationText || 'n/a'}"`
+        );
+      }
+
+      if (finalDiagnostics.signInRequired) {
+        throw new Error(
+          `Amazon Fresh appears to require sign-in or delivery eligibility for ZIP ${this.zipCode}. ` +
+            `finalUrl=${finalDiagnostics.finalUrl} title="${finalDiagnostics.title}" ` +
+            `body="${finalDiagnostics.bodySnippet}" location="${finalDiagnostics.locationText || 'n/a'}"`
+        );
+      }
+
+      if (finalDiagnostics.zipConfirmed) {
+        console.log(`[OK] Amazon Fresh location set to ZIP ${this.zipCode}`);
+        return finalDiagnostics;
+      }
+
+      lastDiagnostics = finalDiagnostics;
+      const retryReason =
+        finalDiagnostics.executionContextUnstable
+          ? 'execution-context-unstable'
+          : finalDiagnostics.blankPage
+            ? 'blank-page'
+            : finalDiagnostics.popoverOpen
+              ? 'location-popover-still-open'
+              : finalDiagnostics.zipInputHasZip
+                ? 'zip-entered-but-not-yet-confirmed'
+                : null;
+
+      if (!retryReason || attempt === ZIP_CONFIRMATION_RETRY_LIMIT) {
+        break;
+      }
+
+      this.logNavigationDiagnostics('Amazon Fresh ZIP confirmation retrying', {
+        ...finalDiagnostics,
+        retrying: true,
+        retryReason
+      });
+      await humanDelay(700, 1400);
+    }
+
+    throw new Error(
+      `Amazon Fresh location did not update to ZIP ${this.zipCode}. ` +
+        `finalUrl=${lastDiagnostics?.finalUrl || page.url()} title="${lastDiagnostics?.title || ''}" ` +
+        `body="${lastDiagnostics?.bodySnippet || ''}" location="${lastDiagnostics?.locationText || 'n/a'}"`
+    );
   }
 
   async establishFreshSession(page) {
@@ -292,8 +554,8 @@ class AmazonFreshScraper extends BaseScraper {
   }
 
   async setDeliveryLocation(page) {
-    const currentText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
-    if (currentText.includes(this.zipCode)) {
+    const currentLocationState = await this.getLocationConfirmationState(page);
+    if (this.isLocationConfirmed(currentLocationState)) {
       console.log(`[OK] Amazon Fresh location already appears set to ${this.zipCode}`);
       return;
     }
@@ -312,6 +574,7 @@ class AmazonFreshScraper extends BaseScraper {
     }
 
     await locationLink.click();
+    console.log('[>] Amazon Fresh location modal opened');
     const zipInput = await this.waitForVisibleHandle(page, ZIP_INPUT_SELECTOR, 15000);
     if (!zipInput) {
       throw new Error(`Amazon Fresh visible ZIP input was not found after opening location popover.`);
@@ -324,6 +587,7 @@ class AmazonFreshScraper extends BaseScraper {
 
     const updateButton = await this.getVisibleHandle(page, ZIP_UPDATE_SELECTOR);
     const settlePromise = this.waitForPageSettled(page, 15000);
+    console.log('[>] Amazon Fresh ZIP submit');
     if (updateButton) {
       await updateButton.click();
     } else {
@@ -337,28 +601,7 @@ class AmazonFreshScraper extends BaseScraper {
       await doneButton.click().catch(() => null);
       await doneSettlePromise;
     }
-
-    const diagnostics = await this.getStablePageDiagnostics(page, null, {
-      cookieCount: await getCookieCount(page)
-    });
-    this.logNavigationDiagnostics('Amazon Fresh location', diagnostics);
-
-    if (diagnostics.blocked || diagnostics.verification) {
-      throw new Error(
-        `${this.getProviderSpecificBlockHint()} Location setup was blocked. ` +
-          `finalUrl=${diagnostics.finalUrl} title="${diagnostics.title}" body="${diagnostics.bodySnippet}"`
-      );
-    }
-
-    const updatedText = await this.getStableBodyText(page);
-    if (!updatedText.includes(this.zipCode)) {
-      throw new Error(
-        `Amazon Fresh location did not update to ZIP ${this.zipCode}. ` +
-          `finalUrl=${diagnostics.finalUrl} title="${diagnostics.title}" body="${diagnostics.bodySnippet}"`
-      );
-    }
-
-    console.log(`[OK] Amazon Fresh location set to ZIP ${this.zipCode}`);
+    await this.confirmDeliveryLocation(page);
   }
 
   async navigateToSearch(page, query) {
@@ -367,66 +610,144 @@ class AmazonFreshScraper extends BaseScraper {
       `&almBrandId=QW1hem9uIEZyZXNo`;
     console.log(`[>] Amazon Fresh search: ${searchUrl}`);
 
-    let navigationError = null;
-    const response = await page
-      .goto(searchUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: this.timeout
-      })
-      .catch((error) => {
-        navigationError = error.message;
-        return null;
+    let lastDiagnostics = null;
+
+    for (let attempt = 1; attempt <= SEARCH_NAVIGATION_RETRY_LIMIT; attempt++) {
+      console.log(
+        `[>] Amazon Fresh search navigation attempt ${attempt}/${SEARCH_NAVIGATION_RETRY_LIMIT}`
+      );
+
+      let navigationError = null;
+      const response = await page
+        .goto(searchUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: this.timeout
+        })
+        .catch((error) => {
+          navigationError = error.message;
+          return null;
+        });
+
+      await page.waitForSelector('body', { timeout: 10000 }).catch(() => null);
+      await this.waitForPageSettled(page, attempt === 1 ? 16000 : 22000);
+      await humanDelay(1200, 2200);
+
+      console.log(`[>] Amazon Fresh result selector wait attempt ${attempt}`);
+      const selectorFound = await this.waitForProductResults(
+        page,
+        attempt === 1 ? 14000 : 18000,
+        attempt === 1 ? 8000 : 12000
+      );
+      const diagnostics = await this.getStablePageDiagnostics(page, response, {
+        navigationError,
+        cookieCount: await getCookieCount(page)
+      });
+      const locationState = await this.getLocationConfirmationState(page);
+
+      let enrichedDiagnostics = {
+        ...diagnostics,
+        ...locationState,
+        attempt,
+        selectorFound,
+        blankPage: this.isBlankPageDiagnostics(diagnostics),
+        bouncedToStorefront: this.isAmazonFreshStorefrontUrl(diagnostics.finalUrl),
+        urlMatchesSearch: this.isAmazonFreshSearchUrl(diagnostics.finalUrl),
+        zipConfirmed: this.isLocationConfirmed(locationState)
+      };
+
+      this.logNavigationDiagnostics('Amazon Fresh search', enrichedDiagnostics);
+      const needsManualChallenge =
+        enrichedDiagnostics.blocked || enrichedDiagnostics.verification;
+      enrichedDiagnostics = await this.maybeHandleManualChallenge(
+        page,
+        enrichedDiagnostics,
+        'Amazon Fresh search'
+      );
+      const refreshedLocationState = await this.getLocationConfirmationState(page);
+      enrichedDiagnostics = {
+        ...enrichedDiagnostics,
+        ...refreshedLocationState,
+        attempt,
+        blankPage: this.isBlankPageDiagnostics(enrichedDiagnostics),
+        bouncedToStorefront: this.isAmazonFreshStorefrontUrl(enrichedDiagnostics.finalUrl),
+        urlMatchesSearch: this.isAmazonFreshSearchUrl(enrichedDiagnostics.finalUrl),
+        zipConfirmed: this.isLocationConfirmed(refreshedLocationState)
+      };
+      if (needsManualChallenge) {
+        this.logNavigationDiagnostics('Amazon Fresh search after challenge', enrichedDiagnostics);
+      }
+
+      if (enrichedDiagnostics.blocked || enrichedDiagnostics.verification) {
+        throw new Error(
+          `${this.getProviderSpecificBlockHint()} finalUrl=${enrichedDiagnostics.finalUrl} ` +
+            `title="${enrichedDiagnostics.title}" body="${enrichedDiagnostics.bodySnippet}" ` +
+            `html="${enrichedDiagnostics.htmlSnippet}"`
+        );
+      }
+
+      if (enrichedDiagnostics.signInRequired) {
+        throw new Error(
+          `Amazon Fresh appears to require sign-in or delivery eligibility for ZIP ${this.zipCode}. ` +
+            `finalUrl=${enrichedDiagnostics.finalUrl} title="${enrichedDiagnostics.title}" ` +
+            `body="${enrichedDiagnostics.bodySnippet}"`
+        );
+      }
+
+      if (enrichedDiagnostics.selectorFound || enrichedDiagnostics.noResults) {
+        return { diagnostics: enrichedDiagnostics, searchUrl };
+      }
+
+      if (enrichedDiagnostics.status && enrichedDiagnostics.status >= 400) {
+        throw new Error(
+          `Amazon Fresh returned HTTP ${enrichedDiagnostics.status} for ${searchUrl}. ` +
+            `${this.getProviderSpecificBlockHint()} finalUrl=${enrichedDiagnostics.finalUrl} ` +
+            `title="${enrichedDiagnostics.title}" body="${enrichedDiagnostics.bodySnippet}" ` +
+            `html="${enrichedDiagnostics.htmlSnippet}"`
+        );
+      }
+
+      lastDiagnostics = enrichedDiagnostics;
+      const navigationTimedOut = String(enrichedDiagnostics.navigationError || '')
+        .toLowerCase()
+        .includes('timeout');
+      const retryReason =
+        enrichedDiagnostics.executionContextUnstable
+          ? 'execution-context-unstable'
+          : enrichedDiagnostics.blankPage
+            ? 'blank-page'
+            : enrichedDiagnostics.bouncedToStorefront && navigationTimedOut
+              ? 'storefront-bounce-after-timeout'
+              : enrichedDiagnostics.bouncedToStorefront && enrichedDiagnostics.zipConfirmed
+                ? 'storefront-bounce-with-valid-session'
+                : navigationTimedOut && enrichedDiagnostics.urlMatchesSearch
+                  ? 'slow-search-render'
+                  : null;
+
+      if (!retryReason || attempt === SEARCH_NAVIGATION_RETRY_LIMIT) {
+        break;
+      }
+
+      this.logNavigationDiagnostics('Amazon Fresh search retrying', {
+        ...enrichedDiagnostics,
+        retrying: true,
+        retryReason
       });
 
-    await page.waitForSelector('body', { timeout: 10000 }).catch(() => null);
-    await humanDelay(1800, 3200);
-
-    let selectorFound = false;
-    try {
-      await page.waitForSelector(PRODUCT_LINK_SELECTOR, { timeout: 12000 });
-      selectorFound = true;
-    } catch (error) {
-      selectorFound = false;
-    }
-
-    let diagnostics = await this.getPageDiagnostics(page, response, {
-      navigationError,
-      cookieCount: await getCookieCount(page)
-    });
-    diagnostics.selectorFound = selectorFound;
-    this.logNavigationDiagnostics('Amazon Fresh search', diagnostics);
-    diagnostics = await this.maybeHandleManualChallenge(page, diagnostics, 'Amazon Fresh search');
-
-    if (diagnostics.selectorFound || diagnostics.noResults) {
-      return { diagnostics, searchUrl };
-    }
-
-    if (diagnostics.status && diagnostics.status >= 400) {
-      throw new Error(
-        `Amazon Fresh returned HTTP ${diagnostics.status} for ${searchUrl}. ` +
-          `${this.getProviderSpecificBlockHint()} finalUrl=${diagnostics.finalUrl} ` +
-          `title="${diagnostics.title}" body="${diagnostics.bodySnippet}" html="${diagnostics.htmlSnippet}"`
-      );
-    }
-
-    if (diagnostics.blocked || diagnostics.verification) {
-      throw new Error(
-        `${this.getProviderSpecificBlockHint()} finalUrl=${diagnostics.finalUrl} ` +
-          `title="${diagnostics.title}" body="${diagnostics.bodySnippet}" html="${diagnostics.htmlSnippet}"`
-      );
-    }
-
-    if (diagnostics.signInRequired) {
-      throw new Error(
-        `Amazon Fresh appears to require sign-in or delivery eligibility for ZIP ${this.zipCode}. ` +
-          `finalUrl=${diagnostics.finalUrl} title="${diagnostics.title}" body="${diagnostics.bodySnippet}"`
-      );
+      if (enrichedDiagnostics.bouncedToStorefront && !enrichedDiagnostics.zipConfirmed) {
+        console.log('[!] Amazon Fresh search bounce lost ZIP confirmation; re-establishing location');
+        await this.setDeliveryLocation(page);
+      } else {
+        await humanDelay(900, 1800);
+      }
     }
 
     throw new Error(
       `Timed out waiting for Amazon Fresh search results on ${searchUrl}. ` +
-        `finalUrl=${diagnostics.finalUrl} title="${diagnostics.title}" ` +
-        `navigationError=${diagnostics.navigationError || 'none'} body="${diagnostics.bodySnippet}"`
+        `finalUrl=${lastDiagnostics?.finalUrl || page.url()} title="${lastDiagnostics?.title || ''}" ` +
+        `bouncedToStorefront=${lastDiagnostics?.bouncedToStorefront ? 'yes' : 'no'} ` +
+        `zipConfirmed=${lastDiagnostics?.zipConfirmed ? 'yes' : 'no'} ` +
+        `navigationError=${lastDiagnostics?.navigationError || 'none'} ` +
+        `body="${lastDiagnostics?.bodySnippet || ''}"`
     );
   }
 
