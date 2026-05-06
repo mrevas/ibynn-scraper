@@ -8,19 +8,30 @@ const {
   maybeHandleManualChallenge
 } = require('../hardening');
 
-const COSTCO_HOME_URL = 'https://www.costco.com/';
-const SEARCH_URLS = [
-  (query) => `https://www.costco.com/CatalogSearch?dept=All&keyword=${encodeURIComponent(query)}`,
-  (query) => `https://www.costco.com/s?keyword=${encodeURIComponent(query)}`
-];
-const SEARCH_LINK_SELECTOR = 'a[href*=".product."]';
-const PRODUCT_TITLE_SELECTOR = 'h1, [data-testid*="product-name"], [class*="product-name"]';
-const HOMEPAGE_SEARCH_INPUT_SELECTOR = 'input[placeholder="Search Costco"], input[aria-label="Search Costco"]';
-const HOMEPAGE_SEARCH_BUTTON_SELECTOR = 'button[data-testid="SearchButton"], button[aria-label="Search"]';
-const SEARCH_RESULT_CONTAINER_SELECTOR =
-  '[data-testid*="product"], [class*="product-tile"], [class*="search-results"], main';
-const HOMEPAGE_SEARCH_STABILIZATION_ATTEMPTS = 4;
-const DIRECT_SEARCH_NAVIGATION_RETRY_LIMIT = 2;
+const INSTACART_BASE_URL = 'https://www.instacart.com';
+const COSTCO_STOREFRONT_PATH = '/store/costco/storefront';
+const COSTCO_SEARCH_PATH_PREFIX = '/store/costco/s';
+const COSTCO_STOREFRONT_PRODUCT_PATH_PREFIX = '/store/costco/products/';
+const COSTCO_PRODUCT_PATH_PREFIX = '/products/';
+const COSTCO_PRODUCT_URL_PREFIX = `${INSTACART_BASE_URL}${COSTCO_PRODUCT_PATH_PREFIX}`;
+const ZIP_INPUT_SELECTOR = [
+  'input[placeholder="Enter ZIP code"]',
+  'input[placeholder*="ZIP"]',
+  'input[aria-label*="ZIP" i]',
+  'input[name="postal_code"]'
+].join(', ');
+const ZIP_SUBMIT_SELECTOR = [
+  'button[type="submit"]',
+  'button[aria-label*="ZIP" i]',
+  'button[aria-label*="delivery" i]'
+].join(', ');
+const SEARCH_INPUT_SELECTOR = 'input[placeholder="Search Costco..."], input[aria-label="Search"]';
+const PRODUCT_CARD_SELECTOR = '[data-item-card="true"]';
+const PRODUCT_LINK_SELECTOR = [
+  `${PRODUCT_CARD_SELECTOR} a[href*="${COSTCO_PRODUCT_PATH_PREFIX}"]`,
+  `${PRODUCT_CARD_SELECTOR} a[href*="${COSTCO_STOREFRONT_PRODUCT_PATH_PREFIX}"]`
+].join(', ');
+const PRODUCT_TITLE_SELECTOR = 'h1';
 
 class CostcoScraper extends BaseScraper {
   constructor(options = {}) {
@@ -37,10 +48,46 @@ class CostcoScraper extends BaseScraper {
     this.userAgent =
       typeof options.userAgent === 'string' ? options.userAgent : config.userAgent;
     this.manualChallenge = options.manualChallenge;
+    this.zipCode = String(options.zipCode || config.costco.zipCode || '11435').trim();
   }
 
   getStepTimeout(maxTimeout = 20000) {
     return Math.min(this.timeout, maxTimeout);
+  }
+
+  buildAbsoluteUrl(pathOrUrl = COSTCO_STOREFRONT_PATH) {
+    if (/^https?:\/\//i.test(pathOrUrl)) {
+      return pathOrUrl;
+    }
+    return new URL(pathOrUrl, INSTACART_BASE_URL).toString();
+  }
+
+  buildSearchPath(query) {
+    return `${COSTCO_SEARCH_PATH_PREFIX}?k=${encodeURIComponent(query)}`;
+  }
+
+  buildEntryUrl() {
+    return this.buildAbsoluteUrl(COSTCO_STOREFRONT_PATH);
+  }
+
+  buildProductUrl(productId) {
+    if (!productId) {
+      throw new Error('A Costco product ID is required.');
+    }
+
+    if (/^https?:\/\//i.test(productId)) {
+      return productId;
+    }
+
+    if (productId.startsWith(COSTCO_PRODUCT_PATH_PREFIX)) {
+      return this.buildAbsoluteUrl(productId);
+    }
+
+    if (productId.startsWith(COSTCO_STOREFRONT_PRODUCT_PATH_PREFIX)) {
+      return this.buildAbsoluteUrl(productId);
+    }
+
+    return `${COSTCO_PRODUCT_URL_PREFIX}${encodeURIComponent(productId)}?retailerSlug=costco`;
   }
 
   async init() {
@@ -94,22 +141,9 @@ class CostcoScraper extends BaseScraper {
 
   getProviderSpecificBlockHint() {
     if (this.provider === 'brightdata') {
-      return 'Costco blocked the Bright Data-backed browser session.';
+      return 'Instacart Costco storefront blocked the Bright Data-backed browser session.';
     }
-    return 'Costco blocked the local browser session. Bright Data mode is recommended for Costco.';
-  }
-
-  getStatusErrorMessage(status, url) {
-    if (status === 403) {
-      return `Costco returned HTTP 403 for ${url}. ${this.getProviderSpecificBlockHint()}`;
-    }
-    return `Costco returned HTTP ${status} for ${url}.`;
-  }
-
-  makeCostcoError(message, details = {}) {
-    const error = new Error(message);
-    Object.assign(error, details);
-    return error;
+    return 'Instacart Costco storefront blocked the local browser session.';
   }
 
   isTransientExecutionErrorMessage(message = '') {
@@ -122,210 +156,7 @@ class CostcoScraper extends BaseScraper {
     );
   }
 
-  isBlankPageDiagnostics(diagnostics = {}) {
-    const title = String(diagnostics.title || '').trim();
-    const bodySnippet = String(diagnostics.bodySnippet || '').trim();
-    return !title && !bodySnippet;
-  }
-
-  isSearchNavigationUrl(url, query) {
-    if (!url) {
-      return false;
-    }
-
-    const lowerUrl = url.toLowerCase();
-    const encodedQuery = encodeURIComponent(query).toLowerCase();
-    return (
-      lowerUrl.includes(`/s?keyword=${encodedQuery}`) ||
-      lowerUrl.includes(`/catalogsearch?dept=all&keyword=${encodedQuery}`) ||
-      lowerUrl.includes(`keyword=${encodedQuery}`)
-    );
-  }
-
-  trackSearchNavigation(page, query) {
-    const events = {
-      requestUrl: null,
-      responseUrl: null,
-      responseStatus: null,
-      requestFailure: null
-    };
-
-    const matches = (url) => this.isSearchNavigationUrl(url, query);
-    const onRequest = (request) => {
-      if (request.isNavigationRequest() && matches(request.url()) && !events.requestUrl) {
-        events.requestUrl = request.url();
-      }
-    };
-    const onResponse = (response) => {
-      const request = response.request();
-      if (request.isNavigationRequest() && matches(response.url()) && !events.responseUrl) {
-        events.responseUrl = response.url();
-        events.responseStatus = response.status();
-      }
-    };
-    const onRequestFailed = (request) => {
-      if (request.isNavigationRequest() && matches(request.url()) && !events.requestFailure) {
-        events.requestUrl = events.requestUrl || request.url();
-        events.requestFailure = request.failure()?.errorText || 'request failed';
-      }
-    };
-
-    page.on('request', onRequest);
-    page.on('response', onResponse);
-    page.on('requestfailed', onRequestFailed);
-
-    return {
-      events,
-      stop: () => {
-        page.off('request', onRequest);
-        page.off('response', onResponse);
-        page.off('requestfailed', onRequestFailed);
-      }
-    };
-  }
-
-  async getPageDiagnostics(page, response, fallback = {}) {
-    const responseStatus =
-      response && typeof response.status === 'function' ? response.status() : null;
-    const status = responseStatus ?? fallback.responseStatus ?? fallback.status ?? null;
-
-    const pageData = await page
-      .evaluate((currentStatus) => {
-        const text = document.body?.innerText || '';
-        const normalized = text.toLowerCase();
-        const html = document.documentElement?.outerHTML || '';
-        return {
-          status: currentStatus,
-          finalUrl: window.location.href,
-          title: document.title || '',
-          readyState: document.readyState || '',
-          blocked:
-            normalized.includes('access denied') ||
-            normalized.includes("you don't have permission") ||
-            normalized.includes('forbidden') ||
-            normalized.includes('temporarily blocked'),
-          verification:
-            normalized.includes('verify you are human') ||
-            normalized.includes('captcha') ||
-            normalized.includes('security check'),
-          homepage:
-            window.location.href === 'https://www.costco.com/' ||
-            document.title === 'Welcome to Costco Wholesale',
-          noResults:
-            normalized.includes('no results') ||
-            normalized.includes('0 results') ||
-            normalized.includes('did not match any products') ||
-            normalized.includes('sorry, we were unable to find'),
-          bodyLength: text.replace(/\s+/g, ' ').trim().length,
-          readError: null,
-          executionContextUnstable: false,
-          bodySnippet: text.replace(/\s+/g, ' ').trim().slice(0, 300),
-          htmlSnippet: html.replace(/\s+/g, ' ').trim().slice(0, 300)
-        };
-      }, status)
-      .catch((error) => ({
-        status,
-        finalUrl: page.url(),
-        title: '',
-        readyState: 'unavailable',
-        blocked: false,
-        verification: false,
-        homepage: page.url() === COSTCO_HOME_URL,
-        noResults: false,
-        bodyLength: 0,
-        readError: error.message,
-        executionContextUnstable: this.isTransientExecutionErrorMessage(error.message),
-        bodySnippet: `Unable to read page body: ${error.message}`,
-        htmlSnippet: ''
-      }));
-
-    return {
-      ...pageData,
-      requestUrl: fallback.requestUrl || null,
-      responseUrl: fallback.responseUrl || null,
-      responseStatus: fallback.responseStatus ?? responseStatus ?? null,
-      requestFailure: fallback.requestFailure || null,
-      navigationError: fallback.navigationError || null,
-      cookieCount: fallback.cookieCount ?? null
-    };
-  }
-
-  getSearchTimeoutMessage(searchUrl, diagnostics) {
-    const requestSummary = diagnostics.requestUrl
-      ? `requestUrl=${diagnostics.requestUrl}`
-      : 'requestUrl=none';
-    const responseSummary =
-      diagnostics.responseStatus != null
-        ? `responseStatus=${diagnostics.responseStatus} responseUrl=${diagnostics.responseUrl || 'unknown'}`
-        : 'responseStatus=none';
-    const failureSummary = diagnostics.requestFailure
-      ? `requestFailure=${diagnostics.requestFailure}`
-      : 'requestFailure=none';
-    const navigationSummary = diagnostics.navigationError
-      ? `navigationError="${diagnostics.navigationError}"`
-      : 'navigationError=none';
-
-    return (
-      `Costco search did not finish for ${searchUrl}. ${requestSummary} ${responseSummary} ` +
-      `${failureSummary} ${navigationSummary} finalUrl=${diagnostics.finalUrl} title="${diagnostics.title}" ` +
-      `body="${diagnostics.bodySnippet}"`
-    );
-  }
-
-  logNavigationDiagnostics(stage, diagnostics) {
-    console.log(`${stage} diagnostics`, {
-      provider: this.provider,
-      status: diagnostics.status,
-      finalUrl: diagnostics.finalUrl,
-      title: diagnostics.title,
-      readyState: diagnostics.readyState,
-      blocked: diagnostics.blocked,
-      verification: diagnostics.verification,
-      homepage: diagnostics.homepage,
-      noResults: diagnostics.noResults,
-      bodyLength: diagnostics.bodyLength,
-      readError: diagnostics.readError,
-      executionContextUnstable: diagnostics.executionContextUnstable,
-      blankPage: diagnostics.blankPage,
-      searchUrlReached: diagnostics.searchUrlReached,
-      searchNavigationObserved: diagnostics.searchNavigationObserved,
-      selectorFound: diagnostics.selectorFound,
-      queryVisible: diagnostics.queryVisible,
-      retrying: diagnostics.retrying,
-      retryReason: diagnostics.retryReason,
-      attempt: diagnostics.attempt,
-      requestUrl: diagnostics.requestUrl,
-      responseUrl: diagnostics.responseUrl,
-      responseStatus: diagnostics.responseStatus,
-      requestFailure: diagnostics.requestFailure,
-      navigationError: diagnostics.navigationError,
-      cookieCount: diagnostics.cookieCount,
-      bodySnippet: diagnostics.bodySnippet
-    });
-  }
-
-  async hasProductResults(page) {
-    try {
-      return Boolean(await page.$(SEARCH_LINK_SELECTOR));
-    } catch (error) {
-      return false;
-    }
-  }
-
-  async maybeHandleManualChallenge(page, diagnostics, stage) {
-    return maybeHandleManualChallenge({
-      page,
-      diagnostics,
-      stage,
-      storeName: this.storeName,
-      manualChallenge: this.manualChallenge,
-      getDiagnostics: this.getPageDiagnostics.bind(this),
-      logDiagnostics: this.logNavigationDiagnostics.bind(this),
-      hasResults: this.hasProductResults.bind(this)
-    });
-  }
-
-  async waitForPageSettled(page, timeout = 15000) {
+  async waitForPageSettled(page, timeout = 12000) {
     await Promise.race([
       page
         .waitForNavigation({ waitUntil: 'domcontentloaded', timeout })
@@ -352,497 +183,315 @@ class CostcoScraper extends BaseScraper {
     await humanDelay(900, 1800);
   }
 
-  async getStablePageDiagnostics(page, response = null, fallback = {}, attempts = 4) {
-    let diagnostics = null;
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      diagnostics = await this.getPageDiagnostics(page, response, fallback);
-      diagnostics.blankPage = this.isBlankPageDiagnostics(diagnostics);
-      if (!diagnostics.executionContextUnstable && !diagnostics.blankPage) {
-        return diagnostics;
-      }
-      await this.waitForPageSettled(page, 5000);
-    }
-    if (diagnostics) {
-      diagnostics.blankPage = this.isBlankPageDiagnostics(diagnostics);
-    }
-    return diagnostics;
+  async getPageDiagnostics(page, response = null, fallback = {}) {
+    const responseStatus =
+      response && typeof response.status === 'function' ? response.status() : null;
+    const status = responseStatus ?? fallback.responseStatus ?? fallback.status ?? null;
+
+    const diagnostics = await page
+      .evaluate(
+        ({ status: currentStatus, searchPathPrefix, productLinkSelector, zipSelector, searchSelector }) => {
+          const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
+          const text = normalize(document.body?.innerText || '');
+          const lower = text.toLowerCase();
+
+          return {
+            status: currentStatus,
+            finalUrl: window.location.href,
+            title: document.title || '',
+            readyState: document.readyState || '',
+            blocked:
+              lower.includes('access denied') ||
+              lower.includes("you don't have permission") ||
+              lower.includes('forbidden') ||
+              lower.includes('temporarily blocked') ||
+              lower.includes('request blocked'),
+            verification:
+              lower.includes('verify you are human') ||
+              lower.includes('captcha') ||
+              lower.includes('security check') ||
+              lower.includes('pardon our interruption'),
+            hasZipPrompt: Boolean(document.querySelector(zipSelector)),
+            hasSearchInput: Boolean(document.querySelector(searchSelector)),
+            hasProductResults: Boolean(document.querySelector(productLinkSelector)),
+            noResults:
+              lower.includes('no results for') ||
+              lower.includes('no results') ||
+              lower.includes('no items found') ||
+              lower.includes('did not match any products') ||
+              lower.includes('try another search'),
+            onStorefrontPage: window.location.pathname === '/store/costco/storefront',
+            onSearchPage:
+              window.location.pathname === searchPathPrefix ||
+              window.location.pathname.startsWith(`${searchPathPrefix}/`) ||
+              window.location.href.includes(`${searchPathPrefix}?`),
+            bodyLength: text.length,
+            bodySnippet: text.slice(0, 400)
+          };
+        },
+        {
+          status,
+          searchPathPrefix: COSTCO_SEARCH_PATH_PREFIX,
+          productLinkSelector: PRODUCT_LINK_SELECTOR,
+          zipSelector: ZIP_INPUT_SELECTOR,
+          searchSelector: SEARCH_INPUT_SELECTOR
+        }
+      )
+      .catch((error) => ({
+        status,
+        finalUrl: page.url(),
+        title: '',
+        readyState: 'unavailable',
+        blocked: false,
+        verification: false,
+        hasZipPrompt: false,
+        hasSearchInput: false,
+        hasProductResults: false,
+        noResults: false,
+        onStorefrontPage: page.url().includes(COSTCO_STOREFRONT_PATH),
+        onSearchPage: page.url().includes(COSTCO_SEARCH_PATH_PREFIX),
+        bodyLength: 0,
+        bodySnippet: `Unable to read page body: ${error.message}`,
+        executionContextUnstable: this.isTransientExecutionErrorMessage(error.message)
+      }));
+
+    return {
+      ...diagnostics,
+      responseStatus: responseStatus ?? null,
+      cookieCount: fallback.cookieCount ?? null,
+      navigationError: fallback.navigationError || null
+    };
   }
 
-  async getStableBodyText(page, attempts = 4) {
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      const text = await page.evaluate(() => document.body?.innerText || '').catch(() => null);
-      if (typeof text === 'string' && text.trim()) {
-        return text;
-      }
-      await this.waitForPageSettled(page, 5000);
-    }
-    return '';
+  logNavigationDiagnostics(stage, diagnostics) {
+    console.log(`${stage} diagnostics`, {
+      provider: this.provider,
+      zipCode: this.zipCode,
+      status: diagnostics.status,
+      finalUrl: diagnostics.finalUrl,
+      title: diagnostics.title,
+      readyState: diagnostics.readyState,
+      blocked: diagnostics.blocked,
+      verification: diagnostics.verification,
+      hasZipPrompt: diagnostics.hasZipPrompt,
+      hasSearchInput: diagnostics.hasSearchInput,
+      hasProductResults: diagnostics.hasProductResults,
+      noResults: diagnostics.noResults,
+      onStorefrontPage: diagnostics.onStorefrontPage,
+      onSearchPage: diagnostics.onSearchPage,
+      navigationError: diagnostics.navigationError,
+      responseStatus: diagnostics.responseStatus,
+      cookieCount: diagnostics.cookieCount,
+      bodySnippet: diagnostics.bodySnippet
+    });
   }
 
-  async waitForSearchSignals(page, primaryTimeout = 9000, secondaryTimeout = 8000) {
+  async hasProductResults(page) {
     try {
-      await page.waitForSelector(SEARCH_LINK_SELECTOR, { timeout: primaryTimeout });
-      return true;
-    } catch (error) {
-      if (this.isTransientExecutionErrorMessage(error.message)) {
-        await this.waitForPageSettled(page, 5000);
-      } else {
-        await page.waitForSelector(SEARCH_RESULT_CONTAINER_SELECTOR, { timeout: 4000 }).catch(() => null);
-        await humanDelay(700, 1400);
-      }
-    }
-
-    try {
-      await page.waitForSelector(SEARCH_LINK_SELECTOR, { timeout: secondaryTimeout });
-      return true;
+      return Boolean(await page.$(PRODUCT_LINK_SELECTOR));
     } catch (error) {
       return false;
     }
   }
 
-  async buildSearchDiagnostics(page, response, fallback, query, options = {}) {
-    const diagnostics = await this.getStablePageDiagnostics(page, response, fallback);
-    const bodyText = await this.getStableBodyText(page, 3);
-    const queryVisible = bodyText.toLowerCase().includes(query.toLowerCase());
-    const searchUrlReached = this.isSearchNavigationUrl(diagnostics.finalUrl, query);
-    const searchNavigationObserved = Boolean(
-      fallback.requestUrl || fallback.responseUrl || searchUrlReached
-    );
-    const shouldWaitForResults =
-      !diagnostics.blocked &&
-      !diagnostics.verification &&
-      !diagnostics.noResults &&
-      (searchNavigationObserved || !diagnostics.homepage);
-    const selectorFound = shouldWaitForResults
-      ? await this.waitForSearchSignals(
-          page,
-          options.primarySelectorTimeout ?? 9000,
-          options.secondarySelectorTimeout ?? 7000
-        )
-      : false;
-
-    return {
-      ...diagnostics,
-      queryVisible,
-      selectorFound,
-      searchUrlReached,
-      searchNavigationObserved,
-      attempt: options.attempt
-    };
+  async maybeHandleManualChallenge(page, diagnostics, stage) {
+    return maybeHandleManualChallenge({
+      page,
+      diagnostics,
+      stage,
+      storeName: this.storeName,
+      manualChallenge: this.manualChallenge,
+      getDiagnostics: this.getPageDiagnostics.bind(this),
+      logDiagnostics: this.logNavigationDiagnostics.bind(this),
+      hasResults: this.hasProductResults.bind(this)
+    });
   }
 
-  async resolveHomepageSearchAttempt(page, query, navigationProbe, navigationError) {
-    let lastDiagnostics = null;
-    for (let attempt = 1; attempt <= HOMEPAGE_SEARCH_STABILIZATION_ATTEMPTS; attempt++) {
-      if (attempt > 1) {
-        await this.waitForPageSettled(page, 7000);
-      }
+  async setZipCode(page) {
+    await page.waitForSelector(ZIP_INPUT_SELECTOR, { timeout: this.getStepTimeout(12000) });
+    await page.$eval(
+      ZIP_INPUT_SELECTOR,
+      (input, zipCode) => {
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          'value'
+        )?.set;
 
-      const diagnostics = await this.buildSearchDiagnostics(
-        page,
-        null,
-        {
-          ...navigationProbe.events,
-          navigationError,
-          cookieCount: await getCookieCount(page)
-        },
-        query,
-        {
-          attempt,
-          primarySelectorTimeout: attempt === 1 ? 7000 : 11000,
-          secondarySelectorTimeout: attempt === 1 ? 5000 : 8000
+        if (setter) {
+          setter.call(input, '');
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          setter.call(input, zipCode);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          return;
         }
-      );
 
-      this.logNavigationDiagnostics('Costco homepage search', diagnostics);
+        input.value = zipCode;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      },
+      this.zipCode
+    );
+  }
 
-      const looksLikeSearchResults =
-        !diagnostics.homepage &&
-        (diagnostics.searchUrlReached || diagnostics.queryVisible || diagnostics.selectorFound);
+  async submitZipCodeGate(page) {
+    await this.setZipCode(page);
 
-      if ((diagnostics.selectorFound && looksLikeSearchResults) || diagnostics.noResults) {
-        return diagnostics;
-      }
+    const startUrl = page.url();
+    const navigationPromise = page
+      .waitForNavigation({
+        waitUntil: 'domcontentloaded',
+        timeout: this.getStepTimeout(20000)
+      })
+      .catch(() => null);
+    const urlChangePromise = page
+      .waitForFunction((currentUrl) => window.location.href !== currentUrl, {
+        timeout: this.getStepTimeout(20000)
+      }, startUrl)
+      .catch(() => null);
 
-      lastDiagnostics = diagnostics;
-      const retryReason =
-        diagnostics.executionContextUnstable
-          ? 'execution-context-unstable'
-          : diagnostics.blankPage
-            ? 'blank-page'
-            : diagnostics.searchUrlReached || diagnostics.searchNavigationObserved
-              ? 'successful-url-transition-awaiting-stable-dom'
-              : null;
-
-      if (!retryReason || attempt === HOMEPAGE_SEARCH_STABILIZATION_ATTEMPTS) {
-        break;
-      }
-
-      this.logNavigationDiagnostics('Costco homepage search retrying', {
-        ...diagnostics,
-        retrying: true,
-        retryReason
-      });
-    }
-
-    return lastDiagnostics;
+    await page.click(ZIP_SUBMIT_SELECTOR);
+    await Promise.race([
+      navigationPromise,
+      urlChangePromise,
+      new Promise((resolve) => setTimeout(resolve, this.getStepTimeout(20000)))
+    ]);
+    await this.waitForPageSettled(page, 14000);
   }
 
   async establishSession(page) {
-    const response = await page.goto(COSTCO_HOME_URL, {
+    const landingUrl = this.buildEntryUrl();
+    const response = await page.goto(landingUrl, {
       waitUntil: 'domcontentloaded',
       timeout: this.timeout
     });
     await page.waitForSelector('body', { timeout: this.timeout });
-    await page.waitForSelector(HOMEPAGE_SEARCH_INPUT_SELECTOR, { timeout: this.timeout });
-    await page.waitForNetworkIdle({ idleTime: 750, timeout: 5000 }).catch(() => null);
-    await humanDelay(1200, 2400);
+    await this.waitForPageSettled(page, 9000);
 
     let diagnostics = await this.getPageDiagnostics(page, response, {
       cookieCount: await getCookieCount(page)
     });
-    this.logNavigationDiagnostics('Costco homepage', diagnostics);
-    diagnostics = await this.maybeHandleManualChallenge(page, diagnostics, 'Costco homepage');
+    this.logNavigationDiagnostics('Instacart Costco landing', diagnostics);
+    diagnostics = await this.maybeHandleManualChallenge(page, diagnostics, 'Instacart Costco landing');
 
     if (diagnostics.blocked || diagnostics.verification) {
       throw new Error(
-        `${this.getProviderSpecificBlockHint()} Homepage session establishment failed. ` +
-          `status=${diagnostics.status || 'unknown'} url=${diagnostics.finalUrl} title="${diagnostics.title}" ` +
-          `body="${diagnostics.bodySnippet}"`
+        `${this.getProviderSpecificBlockHint()} Landing page session establishment failed. ` +
+          `status=${diagnostics.status || 'unknown'} url=${diagnostics.finalUrl} ` +
+          `title="${diagnostics.title}" body="${diagnostics.bodySnippet}"`
+      );
+    }
+
+    if (diagnostics.hasZipPrompt) {
+      await this.submitZipCodeGate(page);
+      diagnostics = await this.getPageDiagnostics(page, null, {
+        cookieCount: await getCookieCount(page)
+      });
+      this.logNavigationDiagnostics('Instacart Costco post-ZIP', diagnostics);
+      diagnostics = await this.maybeHandleManualChallenge(page, diagnostics, 'Instacart Costco post-ZIP');
+    }
+
+    if (diagnostics.hasZipPrompt) {
+      throw new Error(
+        `Instacart Costco storefront kept the ZIP gate open for ${this.zipCode}. ` +
+          `url=${diagnostics.finalUrl} title="${diagnostics.title}" body="${diagnostics.bodySnippet}"`
       );
     }
 
     return diagnostics;
   }
 
-  async trySearchNavigation(page, query, searchUrl, referer) {
-    let lastDiagnostics = null;
+  async waitForSearchResults(page, query) {
+    const timeout = this.getStepTimeout(25000);
 
-    for (let attempt = 1; attempt <= DIRECT_SEARCH_NAVIGATION_RETRY_LIMIT; attempt++) {
-      const navigationProbe = this.trackSearchNavigation(page, query);
-      let navigationError = null;
-
-      try {
-        const response = await page
-          .goto(searchUrl, {
-            referer,
-            waitUntil: 'domcontentloaded',
-            timeout: this.getStepTimeout()
-          })
-          .catch((error) => {
-            navigationError = error.message;
-            return null;
-          });
-
-        await page.waitForSelector('body', { timeout: 5000 }).catch(() => null);
-        await this.waitForPageSettled(page, attempt === 1 ? 12000 : 16000);
-
-        let diagnostics = await this.buildSearchDiagnostics(
-          page,
-          response,
-          {
-            ...navigationProbe.events,
-            navigationError,
-            cookieCount: await getCookieCount(page)
+    try {
+      await Promise.race([
+        page.waitForSelector(PRODUCT_LINK_SELECTOR, { timeout }),
+        page.waitForFunction(
+          (searchQuery, productLinkSelector) => {
+            const bodyText = (document.body?.innerText || '').toLowerCase();
+            return (
+              bodyText.includes(`results for "${String(searchQuery).toLowerCase()}"`) ||
+              bodyText.includes(`results for ${String(searchQuery).toLowerCase()}`) ||
+              bodyText.includes(`no results for "${String(searchQuery).toLowerCase()}"`) ||
+              Boolean(document.querySelector(productLinkSelector))
+            );
           },
+          { timeout },
           query,
-          {
-            attempt,
-            primarySelectorTimeout: attempt === 1 ? 7000 : 10000,
-            secondarySelectorTimeout: attempt === 1 ? 5000 : 7000
-          }
-        );
-        this.logNavigationDiagnostics('Costco search', diagnostics);
-        const needsManualChallenge = diagnostics.blocked || diagnostics.verification;
-        diagnostics = await this.maybeHandleManualChallenge(page, diagnostics, 'Costco search');
-        if (needsManualChallenge) {
-          diagnostics = await this.buildSearchDiagnostics(
-            page,
-            null,
-            {
-              ...navigationProbe.events,
-              navigationError,
-              cookieCount: await getCookieCount(page)
-            },
-            query,
-            {
-              attempt,
-              primarySelectorTimeout: 9000,
-              secondarySelectorTimeout: 7000
-            }
-          );
-          this.logNavigationDiagnostics('Costco search after challenge', diagnostics);
-        }
-
-        if (diagnostics.selectorFound || diagnostics.noResults) {
-          return diagnostics;
-        }
-
-        if (diagnostics.status && diagnostics.status >= 400) {
-          throw this.makeCostcoError(
-            `${this.getStatusErrorMessage(diagnostics.status, searchUrl)} finalUrl=${diagnostics.finalUrl} ` +
-              `title="${diagnostics.title}" blocked=${diagnostics.blocked} verification=${diagnostics.verification} ` +
-              `body="${diagnostics.bodySnippet}" html="${diagnostics.htmlSnippet}"`,
-            {
-              costcoFailureType: diagnostics.status === 403 ? 'hard-block' : 'http-error',
-              costcoPhase: 'direct-search-navigation',
-              diagnostics
-            }
-          );
-        }
-
-        if (diagnostics.blocked || diagnostics.verification) {
-          throw this.makeCostcoError(
-            `${this.getProviderSpecificBlockHint()} Search navigation was blocked. ` +
-              `url=${searchUrl} finalUrl=${diagnostics.finalUrl} title="${diagnostics.title}" ` +
-              `body="${diagnostics.bodySnippet}" html="${diagnostics.htmlSnippet}"`,
-            {
-              costcoFailureType: 'hard-block',
-              costcoPhase: 'direct-search-navigation',
-              diagnostics
-            }
-          );
-        }
-
-        lastDiagnostics = diagnostics;
-        const retryReason =
-          diagnostics.executionContextUnstable
-            ? 'execution-context-unstable'
-            : diagnostics.blankPage
-              ? 'blank-page'
-              : null;
-
-        if (!retryReason || attempt === DIRECT_SEARCH_NAVIGATION_RETRY_LIMIT) {
-          break;
-        }
-
-        this.logNavigationDiagnostics('Costco search retrying', {
-          ...diagnostics,
-          retrying: true,
-          retryReason
-        });
-      } finally {
-        navigationProbe.stop();
-      }
+          PRODUCT_LINK_SELECTOR
+        )
+      ]);
+    } catch (error) {
+      await this.waitForPageSettled(page, 8000);
     }
 
-    throw this.makeCostcoError(this.getSearchTimeoutMessage(searchUrl, lastDiagnostics || {}), {
-      costcoFailureType: 'search-timeout',
-      costcoPhase: 'direct-search-navigation',
-      diagnostics: lastDiagnostics || null
+    return this.getPageDiagnostics(page, null, {
+      cookieCount: await getCookieCount(page)
     });
   }
 
-  async tryHomepageSearch(page, query) {
-    await page.waitForSelector(HOMEPAGE_SEARCH_INPUT_SELECTOR, { timeout: this.timeout });
-    await page.click(HOMEPAGE_SEARCH_INPUT_SELECTOR, { clickCount: 3 });
-    await page.keyboard.press('Backspace');
-    await page.type(HOMEPAGE_SEARCH_INPUT_SELECTOR, query, { delay: 80 });
-    await humanDelay(900, 1800);
+  async navigateToSearch(page, query) {
+    const searchPath = this.buildSearchPath(query);
+    const searchUrl = this.buildAbsoluteUrl(searchPath);
 
-    const stepTimeout = this.getStepTimeout(15000);
-    const navigationProbe = this.trackSearchNavigation(page, query);
+    await this.establishSession(page);
+
     let navigationError = null;
-    const startUrl = page.url();
-    const navigationPromise = page
-      .waitForNavigation({
+    const response = await page
+      .goto(searchUrl, {
         waitUntil: 'domcontentloaded',
-        timeout: stepTimeout
+        timeout: this.timeout
       })
       .catch((error) => {
         navigationError = error.message;
         return null;
       });
-    const urlChangePromise = page
-      .waitForFunction(
-        (currentUrl) => window.location.href !== currentUrl,
-        { timeout: stepTimeout },
-        startUrl
-      )
-      .catch(() => null);
 
-    if (await page.$(HOMEPAGE_SEARCH_BUTTON_SELECTOR)) {
-      await page.$eval(HOMEPAGE_SEARCH_BUTTON_SELECTOR, (el) => el.click());
-    } else {
-      await page.keyboard.press('Enter');
-    }
+    await this.waitForPageSettled(page, 9000);
 
-    await Promise.race([
-      navigationPromise,
-      urlChangePromise,
-      new Promise((resolve) => setTimeout(resolve, stepTimeout))
-    ]);
-    const bodyWaitError = await page
-      .waitForSelector('body', { timeout: 5000 })
-      .then(() => null)
-      .catch((error) => error);
-    if (bodyWaitError) {
-      navigationError = [navigationError, `body wait failed: ${bodyWaitError.message}`]
-        .filter(Boolean)
-        .join('; ');
-    }
-    await this.waitForPageSettled(page, 12000);
+    let diagnostics = await this.getPageDiagnostics(page, response, {
+      navigationError,
+      cookieCount: await getCookieCount(page)
+    });
+    this.logNavigationDiagnostics('Instacart Costco direct search', diagnostics);
 
-    try {
-      let diagnostics = await this.resolveHomepageSearchAttempt(
-        page,
-        query,
-        navigationProbe,
-        navigationError
-      );
-      const needsManualChallenge = diagnostics.blocked || diagnostics.verification;
+    diagnostics = await this.waitForSearchResults(page, query);
+    this.logNavigationDiagnostics('Instacart Costco search results', diagnostics);
+
+    if (diagnostics.blocked || diagnostics.verification) {
       diagnostics = await this.maybeHandleManualChallenge(
         page,
         diagnostics,
-        'Costco homepage search'
+        'Instacart Costco search results'
       );
-      if (needsManualChallenge) {
-        diagnostics = await this.buildSearchDiagnostics(
-          page,
-          null,
-          {
-            ...navigationProbe.events,
-            navigationError,
-            cookieCount: await getCookieCount(page)
-          },
-          query,
-          {
-            attempt: diagnostics.attempt,
-            primarySelectorTimeout: 9000,
-            secondarySelectorTimeout: 7000
-          }
-        );
-        this.logNavigationDiagnostics('Costco homepage search after challenge', diagnostics);
-      }
-
-      const looksLikeSearchResults =
-        !diagnostics.homepage &&
-        (diagnostics.searchUrlReached || diagnostics.queryVisible || diagnostics.selectorFound);
-
-      if ((diagnostics.selectorFound && looksLikeSearchResults) || diagnostics.noResults) {
-        return diagnostics;
-      }
-
-      if (diagnostics.status && diagnostics.status >= 400) {
-        throw this.makeCostcoError(
-          `${this.getStatusErrorMessage(diagnostics.status, diagnostics.finalUrl)} finalUrl=${diagnostics.finalUrl} ` +
-            `title="${diagnostics.title}" blocked=${diagnostics.blocked} verification=${diagnostics.verification} ` +
-            `body="${diagnostics.bodySnippet}" html="${diagnostics.htmlSnippet}"`,
-          {
-            costcoFailureType: diagnostics.status === 403 ? 'hard-block' : 'http-error',
-            costcoPhase: 'homepage-search',
-            searchUrlReached: diagnostics.searchUrlReached,
-            searchNavigationObserved: diagnostics.searchNavigationObserved,
-            diagnostics
-          }
-        );
-      }
-
-      if (diagnostics.blocked || diagnostics.verification) {
-        throw this.makeCostcoError(
-          `${this.getProviderSpecificBlockHint()} Homepage search submission was blocked. ` +
-            `finalUrl=${diagnostics.finalUrl} title="${diagnostics.title}" ` +
-            `body="${diagnostics.bodySnippet}" html="${diagnostics.htmlSnippet}"`,
-          {
-            costcoFailureType: 'hard-block',
-            costcoPhase: 'homepage-search',
-            searchUrlReached: diagnostics.searchUrlReached,
-            searchNavigationObserved: diagnostics.searchNavigationObserved,
-            diagnostics
-          }
-        );
-      }
-
-      throw this.makeCostcoError(this.getSearchTimeoutMessage('homepage-search-ui', diagnostics), {
-        costcoFailureType:
-          diagnostics.searchUrlReached || diagnostics.searchNavigationObserved
-            ? 'transient-navigation-instability'
-            : 'homepage-search-not-triggered',
-        costcoPhase: 'homepage-search',
-        searchUrlReached: diagnostics.searchUrlReached,
-        searchNavigationObserved: diagnostics.searchNavigationObserved,
-        diagnostics
-      });
-    } finally {
-      navigationProbe.stop();
-    }
-  }
-
-  async navigateToSearch(page, query) {
-    const homeDiagnostics = await this.establishSession(page);
-
-    const errors = [];
-    let homepageSearchError = null;
-    try {
-      const diagnostics = await this.tryHomepageSearch(page, query);
-      return { diagnostics, searchUrl: 'homepage-search-ui' };
-    } catch (error) {
-      homepageSearchError = error;
-      errors.push(`homepage-search-ui -> ${error.message}`);
-      if (error.costcoFailureType === 'hard-block') {
-        throw error;
-      }
     }
 
-    const shouldSkipDirectFallback =
-      this.provider === 'brightdata' &&
-      homepageSearchError &&
-      (
-        homepageSearchError.searchUrlReached ||
-        homepageSearchError.searchNavigationObserved ||
-        homepageSearchError.costcoFailureType === 'transient-navigation-instability'
+    if (!diagnostics.hasProductResults && !diagnostics.noResults) {
+      throw new Error(
+        `Instacart Costco search page shape changed or results did not load for "${query}". ` +
+          `url=${diagnostics.finalUrl} title="${diagnostics.title}" body="${diagnostics.bodySnippet}"`
       );
-
-    if (shouldSkipDirectFallback) {
-      throw this.makeCostcoError(errors.join(' | '), {
-        costcoFailureType: homepageSearchError.costcoFailureType || 'search-failed',
-        costcoPhase: homepageSearchError.costcoPhase || 'homepage-search',
-        diagnostics: homepageSearchError.diagnostics || null
-      });
     }
 
-    for (const buildUrl of SEARCH_URLS) {
-      const searchUrl = buildUrl(query);
-      console.log(`[>] Costco search: ${searchUrl}`);
-      try {
-        const diagnostics = await this.trySearchNavigation(
-          page,
-          query,
-          searchUrl,
-          homeDiagnostics.finalUrl || COSTCO_HOME_URL
-        );
-        return { diagnostics, searchUrl };
-      } catch (error) {
-        errors.push(`${searchUrl} -> ${error.message}`);
-        if (error.costcoFailureType === 'hard-block') {
-          break;
-        }
-      }
-    }
-
-    throw new Error(errors.join(' | '));
+    return diagnostics;
   }
 
   async navigateToProduct(page, url) {
+    const targetUrl = this.buildAbsoluteUrl(url);
     await this.establishSession(page);
 
-    const response = await page.goto(url, {
+    const response = await page.goto(targetUrl, {
       waitUntil: 'domcontentloaded',
       timeout: this.timeout
     });
-    await page.waitForSelector('body', { timeout: this.timeout });
-    await humanDelay(1200, 2400);
+    await page.waitForSelector(PRODUCT_TITLE_SELECTOR, { timeout: this.timeout });
+    await this.waitForPageSettled(page, 7000);
 
-    const diagnostics = await this.getPageDiagnostics(page, response);
-    this.logNavigationDiagnostics('Costco product', diagnostics);
-
-    const status = diagnostics.status;
-    if (status && status >= 400) {
-      throw new Error(
-        `${this.getStatusErrorMessage(status, url)} finalUrl=${diagnostics.finalUrl} ` +
-          `title="${diagnostics.title}" body="${diagnostics.bodySnippet}"`
-      );
-    }
+    const diagnostics = await this.getPageDiagnostics(page, response, {
+      cookieCount: await getCookieCount(page)
+    });
+    this.logNavigationDiagnostics('Instacart Costco product', diagnostics);
 
     if (diagnostics.blocked || diagnostics.verification) {
       throw new Error(
@@ -850,8 +499,6 @@ class CostcoScraper extends BaseScraper {
           `finalUrl=${diagnostics.finalUrl} title="${diagnostics.title}" body="${diagnostics.bodySnippet}"`
       );
     }
-
-    await page.waitForSelector(PRODUCT_TITLE_SELECTOR, { timeout: this.timeout });
   }
 
   async search(query, options = {}) {
@@ -863,76 +510,67 @@ class CostcoScraper extends BaseScraper {
       page = await this.getPage();
       console.log('costco scraper config', {
         provider: this.provider,
+        zipCode: this.zipCode,
         hasAuth: Boolean(config.brightdata.auth),
-        browserWSEndpoint: this.browserWSEndpoint || config.brightdata.browserWSEndpoint
-          ? 'configured'
-          : 'missing'
+        browserWSEndpoint:
+          this.browserWSEndpoint || config.brightdata.browserWSEndpoint ? 'configured' : 'missing'
       });
 
-      await this.navigateToSearch(page, query);
+      const diagnostics = await this.navigateToSearch(page, query);
+      if (diagnostics.noResults) {
+        console.log('[OK] Done - 0 total Costco products');
+        return [];
+      }
 
-      const pageRaw = await page.evaluate(() => {
+      const pageRaw = await page.evaluate((productLinkSelector) => {
+        const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
         const parsePrice = (text) => {
-          const match = text.match(/\$([\d,]+(?:\.\d{2})?)/);
+          const match = String(text || '').match(/\$([\d,]+(?:\.\d{2})?)/);
           return match ? parseFloat(match[1].replace(/,/g, '')) : null;
         };
+        const getAbsoluteUrl = (href) => {
+          try {
+            return new URL(href, window.location.origin).toString();
+          } catch (error) {
+            return null;
+          }
+        };
 
-        const normalizeTitle = (text) =>
-          (text || '')
-            .replace(/\s+/g, ' ')
-            .replace(/^view details\s*/i, '')
-            .trim();
+        return [...document.querySelectorAll('[data-item-card="true"]')]
+          .map((card) => {
+            const link = card.querySelector(productLinkSelector);
+            if (!link) {
+              return null;
+            }
 
-        const links = [...document.querySelectorAll('a[href*=".product."]')];
-        return links.map((link) => {
-          const url = link.href;
-          const container =
-            link.closest('article') ||
-            link.closest('li') ||
-            link.closest('[class*="product"]') ||
-            link.parentElement;
+            const href = getAbsoluteUrl(link.getAttribute('href') || link.href);
+            const heading =
+              normalize(card.querySelector('[role="heading"][aria-level]')?.textContent) ||
+              normalize(link.querySelector('img')?.getAttribute('alt')) ||
+              normalize(link.textContent);
+            const screenReaderTexts = [...card.querySelectorAll('.screen-reader-only')]
+              .map((el) => normalize(el.textContent))
+              .filter(Boolean);
+            const currentPriceText =
+              screenReaderTexts.find((text) => /^Current price:/i.test(text)) ||
+              normalize(card.innerText);
+            const priceMatch = currentPriceText.match(
+              /Current price:\s*(\$[\d,]+(?:\.\d{2})?(?:\s+per\s+package\s+\(estimated\))?)/i
+            );
+            const image = link.querySelector('img[data-testid="item-card-image"], img');
+            const productIdMatch = href?.match(/\/products\/(\d+)/i);
 
-          const containerText = (container?.innerText || '').replace(/\s+/g, ' ').trim();
-          const linkText = normalizeTitle(
-            link.getAttribute('aria-label') || link.title || link.innerText || link.textContent
-          );
-
-          const image =
-            container?.querySelector('img')?.src ||
-            container?.querySelector('img')?.getAttribute('data-src') ||
-            null;
-
-          const ratingMatch = containerText.match(/rated\s+([\d.]+)\s+out of 5/i);
-          const reviewsMatch =
-            containerText.match(/\(([\d,]+)\)/) ||
-            containerText.match(/based on\s+([\d,]+)\s+reviews?/i);
-
-          const itemMatch =
-            containerText.match(/item\s+#?\s*([A-Za-z0-9-]+)/i) ||
-            url.match(/product\.([^.]+)\.html/i);
-
-          const titleFromText = containerText
-            .split(/\$[\d,]+(?:\.\d{2})?/)
-            .map((part) => normalizeTitle(part))
-            .find((part) => part && !/^rated\s/i.test(part) && !/^item\s/i.test(part));
-
-          const title = linkText || titleFromText || 'N/A';
-          const priceMatch = containerText.match(/\$[\d,]+(?:\.\d{2})?/);
-          const price = priceMatch ? priceMatch[0] : null;
-          const extractedPrice = price ? parsePrice(price) : null;
-
-          return {
-            name: title,
-            price,
-            extractedPrice,
-            rating: ratingMatch ? parseFloat(ratingMatch[1]) : null,
-            reviews: reviewsMatch ? parseInt(reviewsMatch[1].replace(/,/g, ''), 10) : null,
-            url,
-            thumbnail: image,
-            productId: itemMatch ? itemMatch[1] : 'N/A'
-          };
-        });
-      });
+            return {
+              name: heading || 'N/A',
+              price: priceMatch ? priceMatch[1] : null,
+              extractedPrice: parsePrice(priceMatch ? priceMatch[1] : currentPriceText),
+              url: href,
+              thumbnail: image?.currentSrc || image?.src || null,
+              productId: productIdMatch ? productIdMatch[1] : 'N/A'
+            };
+          })
+          .filter(Boolean);
+      }, PRODUCT_LINK_SELECTOR);
 
       const products = pageRaw
         .filter((product) => product.name && product.name !== 'N/A' && product.url)
@@ -953,8 +591,8 @@ class CostcoScraper extends BaseScraper {
           source_icon: 'https://www.costco.com/favicon.ico',
           price: product.price,
           extracted_price: product.extractedPrice,
-          rating: product.rating,
-          reviews: product.reviews,
+          rating: null,
+          reviews: null,
           extensions: [],
           thumbnail: product.thumbnail,
           primary_offer:
@@ -978,32 +616,41 @@ class CostcoScraper extends BaseScraper {
     let page;
     try {
       page = await this.getPage();
-      const url = `https://www.costco.com/.product.${productId}.html`;
+      const url = this.buildProductUrl(productId);
       console.log(`[>] Fetching Costco product details for ID: ${productId}`);
       await this.navigateToProduct(page, url);
 
       const details = await page.evaluate(() => {
+        const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
         const getText = (selectors) => {
           for (const selector of selectors) {
             const el = document.querySelector(selector);
             if (el?.textContent?.trim()) {
-              return el.textContent.trim();
+              return normalize(el.textContent);
             }
           }
           return 'N/A';
         };
 
+        const priceText =
+          [...document.querySelectorAll('.screen-reader-only')]
+            .map((el) => normalize(el.textContent))
+            .find((text) => /^Current price:/i.test(text)) || 'N/A';
+
+        const detailsHeading = [...document.querySelectorAll('h2, h3, [role="heading"]')].find(
+          (el) => normalize(el.textContent).toLowerCase() === 'details'
+        );
+        const description =
+          normalize(detailsHeading?.parentElement?.innerText) ||
+          normalize(detailsHeading?.nextElementSibling?.innerText) ||
+          'N/A';
+
         return {
-          title: getText(['h1', '[data-testid*="product-name"]', '[class*="product-name"]']),
-          price: getText(['[data-testid*="price"]', '[class*="price"]', '[id*="price"]']),
-          description: getText([
-            '[data-testid*="description"]',
-            '[class*="description"]',
-            '#product-details',
-            '.product-details'
-          ]),
-          rating: getText(['[aria-label*="Rated"]', '[data-testid*="rating"]', '[class*="rating"]']),
-          reviews: getText(['[data-testid*="review"]', '[class*="review"]'])
+          title: getText(['h1']),
+          price: priceText === 'N/A' ? 'N/A' : priceText.replace(/^Current price:\s*/i, ''),
+          description,
+          rating: 'N/A',
+          reviews: 'N/A'
         };
       });
 

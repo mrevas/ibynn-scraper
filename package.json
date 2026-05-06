@@ -1,7 +1,7 @@
 {
   "name": "ibynn-target-scraper",
   "version": "1.0.0",
-  "description": "A web scraper for Target search results with local and Bright Data browser support",
+  "description": "Multi-store product scraper and API helper for Target, Costco via the Instacart storefront, Walmart, and Amazon Fresh with local Chromium and Bright Data support",
   "main": "src/scraper.js",
   "bin": {
     "ibynn-scrape": "src/cli.js",

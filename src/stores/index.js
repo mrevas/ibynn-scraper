@@ -22,7 +22,7 @@ const STORES = {
   costco: {
     name: 'Costco',
     scraper: CostcoScraper,
-    description: 'Costco.com product scraper'
+    description: 'Instacart Costco storefront product scraper'
   },
   walmart: {
     name: 'Walmart',

@@ -1,6 +1,6 @@
 # Target Search Scraper
 
-A powerful, modular Node.js web scraper for Target.com, Costco.com, Walmart.com, and Amazon Fresh product searches with support for both local Chromium and Bright Data Browser API sessions.
+A powerful, modular Node.js scraper and API helper for Target, Costco via the Instacart storefront, Walmart, and Amazon Fresh product searches with local Chromium and Bright Data Browser API support.
 
 ## Features
 
@@ -122,9 +122,19 @@ Costco CLI:
 npm run costco:scrape -- "milk" 10
 ```
 
+Costco uses the Instacart storefront and ZIP `11435` by default. Override it with:
+```bash
+node src/costco-cli.js "milk" 10 --zip=11435
+```
+
+Costco Bright Data run:
+```bash
+TARGET_SCRAPER_PROVIDER=brightdata BRIGHTDATA_AUTH=username:password npm run costco:scrape -- "milk" 10 --zip=11435
+```
+
 Costco local manual-challenge/headful mode:
 ```bash
-node src/costco-cli.js "milk" 10 --manual-challenge --user-agent=auto --user-data-dir=".chrome-costco-debug"
+node src/costco-cli.js "milk" 10 --manual-challenge --user-agent=auto --user-data-dir=".chrome-costco-debug" --zip=11435
 ```
 
 Walmart CLI:
@@ -178,6 +188,33 @@ Example:
 For API integration details, including provider options, production env vars,
 Amazon Fresh ZIP handling, hardening behavior, and Bright Data session
 diagnostics, see [API_AGENT_GUIDE.md](./API_AGENT_GUIDE.md).
+
+Short API description:
+Multi-store product search API helper for Target, Costco via the Instacart storefront, Walmart, and Amazon Fresh with local Chromium or Bright Data support.
+
+Costco API example:
+```js
+const {
+  getScraper,
+  buildStoreScraperOptions
+} = require('ibynn-target-scraper');
+
+async function searchCostco(query, limit = 10) {
+  const scraper = getScraper(
+    'costco',
+    buildStoreScraperOptions('costco', {
+      provider: process.env.TARGET_SCRAPER_PROVIDER || 'brightdata',
+      zipCode: process.env.COSTCO_ZIP || '11435'
+    })
+  );
+
+  try {
+    return await scraper.search(query, { limit });
+  } finally {
+    await scraper.close();
+  }
+}
+```
 
 ### Using as a Module
 

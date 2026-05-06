@@ -66,6 +66,10 @@ module.exports = {
     )
   },
 
+  costco: {
+    zipCode: readEnv('COSTCO_ZIP') || '11435'
+  },
+
   // Default search settings
   search: {
     limit: 30,

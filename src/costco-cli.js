@@ -18,6 +18,7 @@ async function main() {
   const query = positional[0];
   const limit = parseNumber(positional[1], config.search.limit);
   const { provider, manualChallenge, scraperOptions } = buildScraperOptions(options, 'costco');
+  const zipCode = options.zip || process.env.COSTCO_ZIP || config.costco.zipCode;
 
   if (!query || query === '--help' || query === '-h') {
     console.log(`
@@ -26,9 +27,9 @@ Usage: ibynn-costco-scrape <search-term> [limit]
 Examples:
   ibynn-costco-scrape "milk" 10
   npm run costco:scrape -- "wireless headphones" 25
-  node src/costco-cli.js "milk" 5 --headful
-  node src/costco-cli.js "milk" 5 --headful --executable-path="C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --user-data-dir=".chrome-costco-debug"
-  node src/costco-cli.js "milk" 5 --manual-challenge --user-agent=auto --user-data-dir=".chrome-costco-debug"
+  node src/costco-cli.js "milk" 5 --headful --zip=11435
+  node src/costco-cli.js "milk" 5 --headful --executable-path="C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --user-data-dir=".chrome-costco-debug" --zip=11435
+  node src/costco-cli.js "milk" 5 --manual-challenge --user-agent=auto --user-data-dir=".chrome-costco-debug" --zip=11435
 
 Provider env:
   TARGET_SCRAPER_PROVIDER=local|brightdata
@@ -36,6 +37,10 @@ Provider env:
   BRIGHTDATA_BROWSER_WS=wss://username:password@brd.superproxy.io:9222
   BRIGHTDATA_API_KEY=your_brightdata_api_key
   TARGET_SCRAPER_HEADLESS=false
+  COSTCO_ZIP=11435
+
+Costco Instacart storefront flags:
+  --zip=11435
 
 ${getCommonHelpFlags()}
 `);
@@ -44,6 +49,7 @@ ${getCommonHelpFlags()}
 
   const scraper = getScraper('costco', {
     ...scraperOptions,
+    zipCode,
     manualChallenge: manualChallenge ? createManualChallengeHandler('Costco') : null
   });
 
@@ -51,6 +57,7 @@ ${getCommonHelpFlags()}
     console.log('\nStarting Costco Search Scraper\n');
     console.log('Store: Costco');
     console.log(`Provider: ${provider}`);
+    console.log(`ZIP code: ${zipCode}`);
     console.log(`Search term: "${query}"`);
     console.log(`Max results: ${limit}\n`);
 

@@ -3,6 +3,7 @@ const CostcoScraper = require('./stores/CostcoScraper');
 const WalmartScraper = require('./stores/WalmartScraper');
 const AmazonFreshScraper = require('./stores/AmazonFreshScraper');
 const { getScraper, listStores, STORES } = require('./stores');
+const { API_DESCRIPTION, buildBrowserOptions, buildStoreScraperOptions } = require('./api-helpers');
 
 // Default export: TargetScraper (for require('ibynn-target-scraper'))
 module.exports = TargetScraper;
@@ -15,3 +16,6 @@ module.exports.AmazonFreshScraper = AmazonFreshScraper;
 module.exports.getScraper = getScraper;
 module.exports.listStores = listStores;
 module.exports.STORES = STORES;
+module.exports.API_DESCRIPTION = API_DESCRIPTION;
+module.exports.buildBrowserOptions = buildBrowserOptions;
+module.exports.buildStoreScraperOptions = buildStoreScraperOptions;
