@@ -156,6 +156,18 @@ class CostcoScraper extends BaseScraper {
     );
   }
 
+  isNavigationTimeoutMessage(message = '') {
+    return String(message || '').toLowerCase().includes('navigation timeout');
+  }
+
+  shouldRetrySearchAfterFailure(error) {
+    const message = error?.message || '';
+    return this.provider === 'brightdata' && (
+      this.isTransientExecutionErrorMessage(message) ||
+      this.isNavigationTimeoutMessage(message)
+    );
+  }
+
   async waitForPageSettled(page, timeout = 12000) {
     await Promise.race([
       page
@@ -406,24 +418,28 @@ class CostcoScraper extends BaseScraper {
 
     try {
       await Promise.race([
-        page.waitForSelector(PRODUCT_LINK_SELECTOR, { timeout }),
-        page.waitForFunction(
-          (searchQuery, productLinkSelector) => {
-            const bodyText = (document.body?.innerText || '').toLowerCase();
-            return (
-              bodyText.includes(`results for "${String(searchQuery).toLowerCase()}"`) ||
-              bodyText.includes(`results for ${String(searchQuery).toLowerCase()}`) ||
-              bodyText.includes(`no results for "${String(searchQuery).toLowerCase()}"`) ||
-              Boolean(document.querySelector(productLinkSelector))
-            );
-          },
-          { timeout },
-          query,
-          PRODUCT_LINK_SELECTOR
+        Promise.resolve().then(() => page.waitForSelector(PRODUCT_LINK_SELECTOR, { timeout })),
+        Promise.resolve().then(() =>
+          page.waitForFunction(
+            (searchQuery, productLinkSelector) => {
+              const bodyText = (document.body?.innerText || '').toLowerCase();
+              return (
+                bodyText.includes(`results for "${String(searchQuery).toLowerCase()}"`) ||
+                bodyText.includes(`results for ${String(searchQuery).toLowerCase()}`) ||
+                bodyText.includes(`no results for "${String(searchQuery).toLowerCase()}"`) ||
+                Boolean(document.querySelector(productLinkSelector))
+              );
+            },
+            { timeout },
+            query,
+            PRODUCT_LINK_SELECTOR
+          )
         )
       ]);
     } catch (error) {
-      await this.waitForPageSettled(page, 8000);
+      if (!this.isTransientExecutionErrorMessage(error.message)) {
+        await this.waitForPageSettled(page, 8000).catch(() => null);
+      }
     }
 
     return this.getPageDiagnostics(page, null, {
@@ -516,7 +532,25 @@ class CostcoScraper extends BaseScraper {
           this.browserWSEndpoint || config.brightdata.browserWSEndpoint ? 'configured' : 'missing'
       });
 
-      const diagnostics = await this.navigateToSearch(page, query);
+      let diagnostics;
+      try {
+        diagnostics = await this.navigateToSearch(page, query);
+      } catch (error) {
+        if (!this.shouldRetrySearchAfterFailure(error)) {
+          throw error;
+        }
+
+        console.log('Instacart Costco search retrying after transient navigation failure', {
+          provider: this.provider,
+          zipCode: this.zipCode,
+          reason: error.message
+        });
+
+        await page.close().catch(() => null);
+        page = await this.getPage();
+        diagnostics = await this.navigateToSearch(page, query);
+      }
+
       if (diagnostics.noResults) {
         console.log('[OK] Done - 0 total Costco products');
         return [];
