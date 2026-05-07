@@ -14,25 +14,100 @@ const {
 } = require('./cli-helpers');
 
 const DEFAULT_ZIP_CODE = '11435';
+const CATEGORY_SEARCHES_FILE_ENV = 'AMAZON_FRESH_CATEGORY_SEARCHES_FILE';
+
+function getResultsDir() {
+  return path.join(process.cwd(), config.results.folder, 'amazonfresh');
+}
+
+function ensureResultsDir() {
+  const resultsDir = getResultsDir();
+  if (!fs.existsSync(resultsDir)) {
+    fs.mkdirSync(resultsDir, { recursive: true });
+  }
+  return resultsDir;
+}
+
+function getOutputFilepath(query) {
+  const resultsDir = ensureResultsDir();
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
+  return path.join(resultsDir, `${sanitizeQuery(query)}_${timestamp}.json`);
+}
+
+function saveQueryResults(query, products) {
+  const filepath = getOutputFilepath(query);
+  fs.writeFileSync(filepath, JSON.stringify(products, null, 2));
+  return filepath;
+}
+
+function printProducts(products) {
+  console.log('\nResults:\n');
+  console.log('-'.repeat(100));
+
+  products.forEach((product) => {
+    console.log(`\n${product.position}. ${product.title}`);
+    console.log(`   Price: ${product.price ?? 'N/A'}`);
+    console.log(`   Rating: ${product.rating ?? 'N/A'}`);
+    console.log(`   URL: ${product.product_link}`);
+    console.log(`   ID: ${product.product_id}`);
+  });
+
+  console.log('\n' + '-'.repeat(100));
+  console.log(`\nScraped ${products.length} products\n`);
+}
+
+function readQueriesFile(queriesFile) {
+  const filepath = path.resolve(process.cwd(), queriesFile);
+  if (!fs.existsSync(filepath)) {
+    throw new Error(`Queries file not found: ${queriesFile}`);
+  }
+
+  return fs
+    .readFileSync(filepath, 'utf8')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+}
+
+function printBatchSummary(savedQueries, failedResults) {
+  console.log('\nBatch summary:\n');
+  console.log(`Saved categories: ${savedQueries.length}`);
+  if (savedQueries.length) {
+    console.log(savedQueries.map((query) => `  - ${query}`).join('\n'));
+  }
+
+  console.log(`\nFailed categories: ${failedResults.length}`);
+  if (failedResults.length) {
+    console.log(
+      failedResults
+        .map((result) => `  - ${result.query}: ${result.error}`)
+        .join('\n')
+    );
+  }
+}
 
 async function main() {
   const { positional, options } = parseArgs(process.argv.slice(2));
-  const query = positional[0];
-  const limit = parseNumber(positional[1], config.search.limit);
+  const queriesFile = options['queries-file'] || process.env[CATEGORY_SEARCHES_FILE_ENV] || null;
+  const showHelp = positional.includes('--help') || positional.includes('-h');
+  const query = queriesFile ? null : positional[0];
+  const limit = parseNumber(positional[queriesFile ? 0 : 1], config.search.limit);
   const { provider, manualChallenge, scraperOptions } = buildScraperOptions(
     options,
     'amazonfresh'
   );
   const zipCode = options.zip || process.env.AMAZON_FRESH_ZIP || DEFAULT_ZIP_CODE;
 
-  if (!query || query === '--help' || query === '-h') {
+  if (showHelp || (!query && !queriesFile)) {
     console.log(`
 Usage: ibynn-amazon-fresh-scrape <search-term> [limit]
+       ibynn-amazon-fresh-scrape --queries-file=queries.txt [limit]
 
 Examples:
   ibynn-amazon-fresh-scrape "milk" 10
   npm run amazonfresh:scrape -- "bananas" 25
   node src/amazon-fresh-cli.js "milk" 5 --headful --zip=11435
+  node src/amazon-fresh-cli.js --queries-file=queries.txt 5 --zip=11435
   node src/amazon-fresh-cli.js "milk" 5 --manual-challenge --user-agent=auto --user-data-dir=".chrome-amazonfresh-debug" --zip=11435
 
 Provider env:
@@ -40,6 +115,7 @@ Provider env:
   BRIGHTDATA_AUTH=username:password
   BRIGHTDATA_BROWSER_WS=wss://username:password@brd.superproxy.io:9222
   BRIGHTDATA_API_KEY=your_brightdata_api_key
+  AMAZON_FRESH_CATEGORY_SEARCHES_FILE=path\\to\\amazon-fresh-category-searches.txt
   TARGET_SCRAPER_HEADLESS=false
   AMAZON_FRESH_ZIP=11435
   AMAZON_FRESH_ACCEPTABLE_ZIP_PREFIXES=111,113,114,116
@@ -47,6 +123,7 @@ Provider env:
 
 Amazon Fresh flags:
   --zip=11435
+  --queries-file=queries.txt
 
 ${getCommonHelpFlags()}
 `);
@@ -66,35 +143,60 @@ ${getCommonHelpFlags()}
     console.log(`Preferred ZIP: ${zipCode}`);
     console.log(`Acceptable ZIP prefixes: ${scraper.acceptableZipPrefixes.join(',')}`);
     console.log(`Acceptable exact ZIPs: ${scraper.acceptableZipCodes.join(',')}`);
-    console.log(`Search term: "${query}"`);
     console.log(`Max results: ${limit}\n`);
 
-    const products = await scraper.search(query, { limit });
+    if (!queriesFile) {
+      console.log(`Search term: "${query}"\n`);
+      const products = await scraper.search(query, { limit });
+      printProducts(products);
 
-    console.log('\nResults:\n');
-    console.log('-'.repeat(100));
-
-    products.forEach((product) => {
-      console.log(`\n${product.position}. ${product.title}`);
-      console.log(`   Price: ${product.price ?? 'N/A'}`);
-      console.log(`   Rating: ${product.rating ?? 'N/A'}`);
-      console.log(`   URL: ${product.product_link}`);
-      console.log(`   ID: ${product.product_id}`);
-    });
-
-    console.log('\n' + '-'.repeat(100));
-    console.log(`\nScraped ${products.length} products\n`);
-
-    const resultsDir = path.join(process.cwd(), config.results.folder, 'amazonfresh');
-    if (!fs.existsSync(resultsDir)) {
-      fs.mkdirSync(resultsDir, { recursive: true });
+      const filepath = saveQueryResults(query, products);
+      console.log(`Results saved to: ${path.relative(process.cwd(), filepath)}\n`);
+      return;
     }
 
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
-    const filepath = path.join(resultsDir, `${sanitizeQuery(query)}_${timestamp}.json`);
-    fs.writeFileSync(filepath, JSON.stringify(products, null, 2));
+    const resolvedQueriesFile = path.resolve(process.cwd(), queriesFile);
+    const queries = readQueriesFile(queriesFile);
+    if (!queries.length) {
+      throw new Error(`No queries found in ${queriesFile}`);
+    }
 
-    console.log(`Results saved to: ${path.relative(process.cwd(), filepath)}\n`);
+    console.log(`Queries file: ${resolvedQueriesFile}`);
+    console.log(`Queries loaded: ${queries.length}\n`);
+
+    const batchResults = await scraper.searchBatch(queries, {
+      limit,
+      continueOnError: true
+    });
+
+    let savedCount = 0;
+    let failureCount = 0;
+    const savedQueries = [];
+    const failedResults = [];
+
+    for (const result of batchResults) {
+      console.log(`\nQuery: "${result.query}"`);
+
+      if (result.error) {
+        failureCount += 1;
+        process.exitCode = 1;
+        failedResults.push(result);
+        console.error(`Error: ${result.error}`);
+        continue;
+      }
+
+      printProducts(result.products);
+      const filepath = saveQueryResults(result.query, result.products);
+      savedCount += 1;
+      savedQueries.push(result.query);
+      console.log(`Results saved to: ${path.relative(process.cwd(), filepath)}\n`);
+    }
+
+    console.log(`Batch complete. Saved ${savedCount} query result set(s).`);
+    if (failureCount) {
+      console.log(`Batch completed with ${failureCount} failed quer${failureCount === 1 ? 'y' : 'ies'}.`);
+    }
+    printBatchSummary(savedQueries, failedResults);
   } catch (error) {
     console.error('Error:', error.message);
     process.exitCode = 1;

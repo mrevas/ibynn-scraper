@@ -38,6 +38,7 @@ const LOCATION_STATUS_SELECTOR = [
 ].join(', ');
 const ZIP_CONFIRMATION_RETRY_LIMIT = 4;
 const SEARCH_NAVIGATION_RETRY_LIMIT = 3;
+const FAST_POLL_INTERVAL_MS = 200;
 
 function normalizeZipCode(value) {
   const match = String(value || '').match(/\d{5}/);
@@ -54,6 +55,10 @@ function normalizeZipList(values, fallback = []) {
   return source
     .map((value) => String(value || '').trim())
     .filter(Boolean);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 class AmazonFreshScraper extends BaseScraper {
@@ -84,6 +89,11 @@ class AmazonFreshScraper extends BaseScraper {
       DEFAULT_ACCEPTABLE_ZIP_CODES
     );
     this.confirmedZipCode = null;
+    this.sessionPage = null;
+    this.sessionReady = false;
+    this.sessionZip = null;
+    this.sessionPreparedAt = null;
+    this.hasLoggedSearchConfig = false;
   }
 
   async init() {
@@ -105,6 +115,8 @@ class AmazonFreshScraper extends BaseScraper {
   }
 
   async close() {
+    await this.resetSession();
+
     if (!this.browser) {
       return;
     }
@@ -119,6 +131,7 @@ class AmazonFreshScraper extends BaseScraper {
       }
     } finally {
       this.browser = null;
+      this.hasLoggedSearchConfig = false;
     }
   }
 
@@ -133,6 +146,70 @@ class AmazonFreshScraper extends BaseScraper {
       userAgent: this.userAgent
     });
     return page;
+  }
+
+  hasUsableSessionPage() {
+    return Boolean(this.sessionPage && !this.sessionPage.isClosed());
+  }
+
+  async getSessionPage() {
+    if (this.hasUsableSessionPage()) {
+      return this.sessionPage;
+    }
+
+    this.sessionPage = await this.getPage();
+    return this.sessionPage;
+  }
+
+  async resetSession() {
+    await this.invalidateSession('reset', { closePage: true, log: false });
+  }
+
+  async invalidateSession(reason, options = {}) {
+    const { closePage = false, log = true } = options;
+    if (log && reason) {
+      console.log(`[!] Resetting Amazon Fresh session: ${reason}`);
+    }
+
+    this.sessionReady = false;
+    this.sessionZip = null;
+    this.sessionPreparedAt = null;
+
+    if (!closePage || !this.sessionPage) {
+      return;
+    }
+
+    const page = this.sessionPage;
+    this.sessionPage = null;
+    if (!page.isClosed()) {
+      await page.close().catch(() => null);
+    }
+  }
+
+  markSessionReady(locationState = {}) {
+    const confirmedZip = this.recordConfirmedZip(locationState) || this.confirmedZipCode || null;
+    this.sessionReady = true;
+    this.sessionZip = confirmedZip;
+    this.sessionPreparedAt = new Date().toISOString();
+    return confirmedZip;
+  }
+
+  logSearchConfig() {
+    if (this.hasLoggedSearchConfig) {
+      return;
+    }
+
+    console.log('amazon fresh scraper config', {
+      provider: this.provider,
+      preferredZipCode: this.zipCode,
+      confirmedZipCode: this.confirmedZipCode,
+      acceptableZipPrefixes: this.acceptableZipPrefixes,
+      acceptableZipCodes: this.acceptableZipCodes,
+      hasAuth: Boolean(config.brightdata.auth),
+      browserWSEndpoint:
+        this.browserWSEndpoint || config.brightdata.browserWSEndpoint ? 'configured' : 'missing'
+    });
+    this.hasLoggedSearchConfig = true;
   }
 
   getProviderSpecificBlockHint() {
@@ -210,6 +287,66 @@ class AmazonFreshScraper extends BaseScraper {
     return !title && !bodySnippet;
   }
 
+  async getQuickPageState(page, fallback = {}) {
+    const status = fallback.status ?? null;
+
+    return page
+      .evaluate((currentStatus) => {
+        const text = document.body?.innerText || '';
+        const normalizedText = text.replace(/\s+/g, ' ').trim();
+        const normalized = normalizedText.toLowerCase();
+        return {
+          status: currentStatus,
+          finalUrl: window.location.href,
+          title: document.title || '',
+          readyState: document.readyState || '',
+          blocked:
+            normalized.includes('captcha') ||
+            normalized.includes('enter the characters you see below') ||
+            normalized.includes('sorry, we just need to make sure') ||
+            normalized.includes('access denied') ||
+            normalized.includes('automated access') ||
+            normalized.includes('robot check'),
+          verification:
+            normalized.includes('captcha') ||
+            normalized.includes('robot check') ||
+            normalized.includes('enter the characters you see below') ||
+            normalized.includes('sorry, we just need to make sure'),
+          signInRequired:
+            normalized.includes('sign in to see your addresses') ||
+            normalized.includes('please sign in') ||
+            normalized.includes('sign in for the best experience'),
+          noResults:
+            normalized.includes('no results') ||
+            normalized.includes('did not match') ||
+            normalized.includes('try checking your spelling'),
+          bodyLength: normalizedText.length,
+          readError: null,
+          executionContextUnstable: false,
+          bodySnippet: normalizedText.slice(0, 300)
+        };
+      }, status)
+      .then((pageData) => ({
+        ...pageData,
+        navigationError: fallback.navigationError || null
+      }))
+      .catch((error) => ({
+        status,
+        finalUrl: page.url(),
+        title: '',
+        readyState: 'unavailable',
+        blocked: false,
+        verification: false,
+        signInRequired: false,
+        noResults: false,
+        bodyLength: 0,
+        readError: error.message,
+        executionContextUnstable: this.isTransientExecutionErrorMessage(error.message),
+        bodySnippet: `Unable to read page body: ${error.message}`,
+        navigationError: fallback.navigationError || null
+      }));
+  }
+
   async getPageDiagnostics(page, response, fallback = {}) {
     const responseStatus =
       response && typeof response.status === 'function' ? response.status() : null;
@@ -273,6 +410,41 @@ class AmazonFreshScraper extends BaseScraper {
       cookieCount: fallback.cookieCount ?? null,
       navigationError: fallback.navigationError || null
     };
+  }
+
+  buildNavigationState(diagnostics, locationState = {}, extras = {}) {
+    return {
+      ...diagnostics,
+      ...locationState,
+      ...extras,
+      blankPage: this.isBlankPageDiagnostics(diagnostics),
+      bouncedToStorefront: this.isAmazonFreshStorefrontUrl(diagnostics.finalUrl),
+      urlMatchesSearch: this.isAmazonFreshSearchUrl(diagnostics.finalUrl),
+      zipConfirmed: this.isLocationConfirmed(locationState),
+      confirmedZipCode: this.confirmedZipCode,
+      acceptableZipRules: this.getAcceptableZipDescription()
+    };
+  }
+
+  async inspectPageState(page, response = null, fallback = {}, extras = {}) {
+    const responseStatus =
+      response && typeof response.status === 'function' ? response.status() : null;
+    const diagnostics = await this.getQuickPageState(page, {
+      status: responseStatus ?? fallback.status ?? null,
+      navigationError: fallback.navigationError
+    });
+    const locationState = await this.getLocationConfirmationState(page);
+    return this.buildNavigationState(diagnostics, locationState, extras);
+  }
+
+  async collectFailureState(page, response = null, fallback = {}, extras = {}) {
+    const withCookies =
+      fallback.cookieCount === undefined
+        ? { ...fallback, cookieCount: await getCookieCount(page) }
+        : fallback;
+    const diagnostics = await this.getStablePageDiagnostics(page, response, withCookies);
+    const locationState = await this.getLocationConfirmationState(page);
+    return this.buildNavigationState(diagnostics, locationState, extras);
   }
 
   logNavigationDiagnostics(stage, diagnostics) {
@@ -363,36 +535,108 @@ class AmazonFreshScraper extends BaseScraper {
       if (handle) {
         return handle;
       }
-      await humanDelay(200, 400);
+      await delay(FAST_POLL_INTERVAL_MS);
     }
     return null;
   }
 
-  async waitForPageSettled(page, timeout = 15000) {
-    await Promise.race([
+  async waitForUsefulSignal(page, timeout = 8000, options = {}) {
+    const { waitForResults = false, waitForLocation = false } = options;
+    return page
+      .waitForFunction(
+        (
+          {
+            waitForResultSignals,
+            waitForLocationSignals,
+            productLinkSelector,
+            locationSelector,
+            zipInputSelector,
+            zipDoneSelector
+          }
+        ) => {
+          const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
+          const isVisible = (el) => {
+            if (!el) {
+              return false;
+            }
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return (
+              rect.width > 0 &&
+              rect.height > 0 &&
+              style.visibility !== 'hidden' &&
+              style.display !== 'none'
+            );
+          };
+
+          const body = document.body;
+          const bodyText = clean(body?.innerText || '');
+          const normalized = bodyText.toLowerCase();
+          const hasBodyContent = Boolean(body) && (bodyText.length > 0 || body.children.length > 0);
+          const hasResultSignals =
+            waitForResultSignals &&
+            (Boolean(document.querySelector(productLinkSelector)) ||
+              normalized.includes('no results') ||
+              normalized.includes('did not match') ||
+              normalized.includes('try checking your spelling'));
+          const hasLocationSignals =
+            waitForLocationSignals &&
+            ([...document.querySelectorAll(locationSelector)].some((el) =>
+              /\b\d{5}(?:-\d{4})?\b/.test(clean(el.innerText || el.textContent || el.getAttribute('aria-label')))
+            ) ||
+              Boolean(document.querySelector(zipInputSelector)) ||
+              [...document.querySelectorAll(zipDoneSelector)].some((el) => isVisible(el)));
+
+          return hasResultSignals || hasLocationSignals || (document.readyState === 'complete' && hasBodyContent);
+        },
+        { timeout },
+        {
+          waitForResultSignals: waitForResults,
+          waitForLocationSignals: waitForLocation,
+          productLinkSelector: PRODUCT_LINK_SELECTOR,
+          locationSelector: LOCATION_STATUS_SELECTOR,
+          zipInputSelector: ZIP_INPUT_SELECTOR,
+          zipDoneSelector: ZIP_DONE_SELECTOR
+        }
+      )
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  async waitForPageSettled(page, timeout = 15000, options = {}) {
+    const { waitForResults = false, waitForLocation = false, includeIdleDelay = false } = options;
+    const usefulSignalTimeout = Math.min(timeout, 8000);
+    const waiters = [
       page
         .waitForNavigation({ waitUntil: 'domcontentloaded', timeout })
+        .then(() => 'navigation')
         .catch(() => null),
-      page
-        .waitForFunction(() => document.readyState !== 'loading', { timeout })
-        .catch(() => null),
-      new Promise((resolve) => setTimeout(resolve, timeout))
-    ]);
-    await page.waitForSelector('body', { timeout: 10000 }).catch(() => null);
-    await page
-      .waitForFunction(
-        () => {
-          const body = document.body;
-          if (!body) {
-            return false;
-          }
-          const text = (body.innerText || '').trim();
-          return document.readyState === 'complete' || text.length > 0 || body.children.length > 0;
-        },
-        { timeout: Math.min(timeout, 8000) }
-      )
-      .catch(() => null);
-    await humanDelay(1000, 2000);
+      delay(timeout).then(() => null)
+    ];
+
+    if (waitForResults || waitForLocation) {
+      waiters.push(
+        this.waitForUsefulSignal(page, usefulSignalTimeout, {
+          waitForResults,
+          waitForLocation
+        }).then((found) => (found ? 'useful-signal' : null))
+      );
+    } else {
+      waiters.push(
+        page
+          .waitForFunction(() => document.readyState !== 'loading', { timeout })
+          .then(() => 'dom-ready')
+          .catch(() => null)
+      );
+    }
+
+    await Promise.race(waiters);
+
+    await page.waitForSelector('body', { timeout: Math.min(timeout, 5000) }).catch(() => null);
+
+    if (includeIdleDelay) {
+      await humanDelay(900, 1800);
+    }
   }
 
   async getStablePageDiagnostics(page, response = null, fallback = {}, attempts = 4) {
@@ -409,17 +653,6 @@ class AmazonFreshScraper extends BaseScraper {
       diagnostics.blankPage = this.isBlankPageDiagnostics(diagnostics);
     }
     return diagnostics;
-  }
-
-  async getStableBodyText(page, attempts = 4) {
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      const text = await page.evaluate(() => document.body?.innerText || '').catch(() => null);
-      if (typeof text === 'string' && text.trim()) {
-        return text;
-      }
-      await this.waitForPageSettled(page, 5000);
-    }
-    return '';
   }
 
   async getLocationConfirmationState(page) {
@@ -485,7 +718,7 @@ class AmazonFreshScraper extends BaseScraper {
 
     const locationAcceptedZip = this.findAcceptedZipFromCodes(state.locationZipCodes || []);
     const bodyAcceptedZip = this.findAcceptedZipFromCodes(state.bodyZipCodes || []);
-    const acceptedZipCode = locationAcceptedZip || (!state.popoverOpen ? bodyAcceptedZip : null);
+    const acceptedZipCode = !state.popoverOpen ? locationAcceptedZip || bodyAcceptedZip : null;
 
     return {
       ...state,
@@ -502,16 +735,69 @@ class AmazonFreshScraper extends BaseScraper {
     return Boolean(locationState.acceptedZipCode);
   }
 
-  async waitForProductResults(page, primaryTimeout = 16000, secondaryTimeout = 10000) {
-    try {
-      await page.waitForSelector(PRODUCT_LINK_SELECTOR, { timeout: primaryTimeout });
+  shouldTreatSignInAsFatal(diagnostics = {}) {
+    return Boolean(diagnostics.signInRequired && !diagnostics.popoverOpen && !diagnostics.zipConfirmed);
+  }
+
+  async shouldReusePreparedSession(page) {
+    if (!this.sessionReady || !page || page.isClosed()) {
+      return false;
+    }
+
+    const quickState = await this.getQuickPageState(page);
+    if (
+      quickState.blocked ||
+      quickState.verification ||
+      quickState.signInRequired ||
+      quickState.executionContextUnstable
+    ) {
+      return false;
+    }
+
+    const locationState = await this.getLocationConfirmationState(page);
+    const state = this.buildNavigationState(quickState, locationState);
+
+    return state.zipConfirmed && (state.urlMatchesSearch || state.bouncedToStorefront);
+  }
+
+  async prepareSession(options = {}) {
+    const { force = false } = options;
+    const page = await this.getSessionPage();
+
+    if (!force && (await this.shouldReusePreparedSession(page).catch(() => false))) {
+      const locationState = await this.getLocationConfirmationState(page);
+      const confirmedZip = this.markSessionReady(locationState);
+      console.log(`[OK] Reusing Amazon Fresh session at ZIP ${confirmedZip}`);
+      return;
+    }
+
+    this.sessionReady = false;
+    await this.establishFreshSession(page);
+
+    const locationState = await this.getLocationConfirmationState(page);
+    if (!this.isLocationConfirmed(locationState)) {
+      const diagnostics = await this.collectFailureState(page);
+      throw new Error(
+        `Amazon Fresh session did not finish with an acceptable ZIP. ` +
+          `finalUrl=${diagnostics.finalUrl} title="${diagnostics.title}" ` +
+          `body="${diagnostics.bodySnippet}" location="${diagnostics.locationText || 'n/a'}"`
+      );
+    }
+
+    const confirmedZip = this.markSessionReady(locationState);
+    console.log(`[OK] Amazon Fresh session prepared at ZIP ${confirmedZip}`);
+  }
+
+  async waitForProductResults(page, primaryTimeout = 10000, secondaryTimeout = 6000) {
+    await this.waitForPageSettled(page, primaryTimeout, { waitForResults: true });
+
+    if (await this.hasProductResults(page)) {
       return true;
-    } catch (error) {
-      if (!this.isTransientExecutionErrorMessage(error.message)) {
-        await this.waitForPageSettled(page, Math.min(secondaryTimeout, 8000));
-      } else {
-        await this.waitForPageSettled(page, 5000);
-      }
+    }
+
+    const quickState = await this.getQuickPageState(page).catch(() => null);
+    if (quickState?.noResults) {
+      return false;
     }
 
     try {
@@ -527,12 +813,10 @@ class AmazonFreshScraper extends BaseScraper {
 
     for (let attempt = 1; attempt <= ZIP_CONFIRMATION_RETRY_LIMIT; attempt++) {
       if (attempt > 1) {
-        await this.waitForPageSettled(page, 7000);
+        await this.waitForPageSettled(page, 7000, { waitForLocation: true, includeIdleDelay: true });
       }
 
-      const diagnostics = await this.getStablePageDiagnostics(page, null, {
-        cookieCount: await getCookieCount(page)
-      });
+      const diagnostics = await this.getStablePageDiagnostics(page);
       const locationState = await this.getLocationConfirmationState(page);
       const enrichedDiagnostics = {
         ...diagnostics,
@@ -570,7 +854,7 @@ class AmazonFreshScraper extends BaseScraper {
         );
       }
 
-      if (finalDiagnostics.signInRequired) {
+      if (this.shouldTreatSignInAsFatal(finalDiagnostics)) {
         throw new Error(
           `Amazon Fresh appears to require sign-in or delivery eligibility for preferred ZIP ${this.zipCode}. ` +
             `finalUrl=${finalDiagnostics.finalUrl} title="${finalDiagnostics.title}" ` +
@@ -579,10 +863,8 @@ class AmazonFreshScraper extends BaseScraper {
       }
 
       if (finalDiagnostics.zipConfirmed) {
-        const confirmedZip = this.recordConfirmedZip(finalDiagnostics);
-        console.log(
-          `[OK] Amazon Fresh location accepted at ZIP ${confirmedZip || this.confirmedZipCode || 'unknown'}`
-        );
+        const confirmedZip = this.markSessionReady(finalDiagnostics);
+        console.log(`[OK] Amazon Fresh location accepted at ZIP ${confirmedZip || 'unknown'}`);
         return finalDiagnostics;
       }
 
@@ -592,6 +874,10 @@ class AmazonFreshScraper extends BaseScraper {
           ? 'execution-context-unstable'
           : finalDiagnostics.blankPage
             ? 'blank-page'
+            : finalDiagnostics.signInRequired && finalDiagnostics.popoverOpen
+              ? 'sign-in-copy-inside-location-popover'
+              : finalDiagnostics.signInRequired
+                ? 'sign-in-required'
             : finalDiagnostics.popoverOpen
               ? 'location-popover-still-open'
               : finalDiagnostics.zipInputHasZip
@@ -628,18 +914,18 @@ class AmazonFreshScraper extends BaseScraper {
       waitUntil: 'domcontentloaded',
       timeout: this.timeout
     });
-    await page.waitForSelector('body', { timeout: 10000 }).catch(() => null);
-    await humanDelay(1200, 2400);
+    await this.waitForPageSettled(page, 9000, { waitForLocation: true });
 
-    let diagnostics = await this.getPageDiagnostics(page, response, {
-      cookieCount: await getCookieCount(page)
-    });
+    let diagnostics = await this.inspectPageState(page, response);
     this.logNavigationDiagnostics('Amazon Fresh storefront', diagnostics);
     diagnostics = await this.maybeHandleManualChallenge(
       page,
       diagnostics,
       'Amazon Fresh storefront'
     );
+
+    const refreshedLocationState = await this.getLocationConfirmationState(page);
+    diagnostics = this.buildNavigationState(diagnostics, refreshedLocationState);
 
     if (diagnostics.blocked || diagnostics.verification) {
       throw new Error(
@@ -652,10 +938,102 @@ class AmazonFreshScraper extends BaseScraper {
     return diagnostics;
   }
 
+  shouldUseFastZipEntry() {
+    return this.headless || this.provider === 'brightdata';
+  }
+
+  async fillZipInput(page, zipInput) {
+    await zipInput.click({ clickCount: 3 }).catch(() => null);
+
+    if (!this.shouldUseFastZipEntry()) {
+      await page.keyboard.press('Backspace');
+      await zipInput.type(this.zipCode, { delay: 60 });
+      await humanDelay(250, 500);
+      return;
+    }
+
+    await zipInput.evaluate((input, zipCode) => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value'
+      )?.set;
+
+      if (setter) {
+        setter.call(input, '');
+        setter.call(input, zipCode);
+      } else {
+        input.value = zipCode;
+      }
+
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }, this.zipCode);
+
+    await delay(FAST_POLL_INTERVAL_MS);
+  }
+
+  async getFocusedElementSummary(page) {
+    return page
+      .evaluate(() => {
+        const el = document.activeElement;
+        if (!el) {
+          return null;
+        }
+
+        const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
+        return {
+          tagName: el.tagName || '',
+          id: el.id || '',
+          name: el.getAttribute('name') || '',
+          ariaLabel: el.getAttribute('aria-label') || '',
+          text: clean(el.innerText || el.textContent || ''),
+          value: clean(el.value || ''),
+          type: el.getAttribute('type') || ''
+        };
+      })
+      .catch(() => null);
+  }
+
+  isDoneButtonSummary(summary = {}) {
+    const haystack = [
+      summary.tagName,
+      summary.id,
+      summary.name,
+      summary.ariaLabel,
+      summary.text,
+      summary.value,
+      summary.type
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+
+    return haystack.includes('done') || haystack.includes('confirmclose') || haystack.includes('glowdonebutton');
+  }
+
+  async dismissLocationPopoverWithKeyboard(page) {
+    console.log('[>] Amazon Fresh ZIP done fallback via four keyboard tabs');
+
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await page.keyboard.press('Tab');
+      await delay(150);
+    }
+
+    const focused = await this.getFocusedElementSummary(page);
+    if (!this.isDoneButtonSummary(focused)) {
+      return false;
+    }
+
+    console.log('[>] Amazon Fresh ZIP done focused via keyboard');
+    await page.keyboard.press('Enter');
+    await this.waitForPageSettled(page, 7000, { waitForLocation: true });
+    return true;
+  }
+
   async setDeliveryLocation(page) {
     const currentLocationState = await this.getLocationConfirmationState(page);
     if (this.isLocationConfirmed(currentLocationState)) {
-      const confirmedZip = this.recordConfirmedZip(currentLocationState);
+      const confirmedZip = this.markSessionReady(currentLocationState);
       console.log(`[OK] Amazon Fresh location already acceptable at ZIP ${confirmedZip}`);
       return;
     }
@@ -667,9 +1045,7 @@ class AmazonFreshScraper extends BaseScraper {
 
     const locationLink = await this.getVisibleHandle(page, LOCATION_LINK_SELECTOR);
     if (!locationLink) {
-      const diagnostics = await this.getPageDiagnostics(page, null, {
-        cookieCount: await getCookieCount(page)
-      });
+      const diagnostics = await this.collectFailureState(page);
       throw new Error(
         `Amazon Fresh location control was not found. finalUrl=${diagnostics.finalUrl} ` +
           `title="${diagnostics.title}" body="${diagnostics.bodySnippet}"`
@@ -678,32 +1054,40 @@ class AmazonFreshScraper extends BaseScraper {
 
     await locationLink.click();
     console.log('[>] Amazon Fresh location modal opened');
+    await this.waitForPageSettled(page, 4000, { waitForLocation: true });
+
     const zipInput = await this.waitForVisibleHandle(page, ZIP_INPUT_SELECTOR, 15000);
     if (!zipInput) {
-      throw new Error(`Amazon Fresh visible ZIP input was not found after opening location popover.`);
+      throw new Error('Amazon Fresh visible ZIP input was not found after opening location popover.');
     }
 
-    await zipInput.click({ clickCount: 3 });
-    await page.keyboard.press('Backspace');
-    await zipInput.type(this.zipCode, { delay: 60 });
-    await humanDelay(500, 1200);
+    await this.fillZipInput(page, zipInput);
 
     const updateButton = await this.getVisibleHandle(page, ZIP_UPDATE_SELECTOR);
-    const settlePromise = this.waitForPageSettled(page, 15000);
     console.log('[>] Amazon Fresh ZIP submit');
     if (updateButton) {
       await updateButton.click();
     } else {
       await page.keyboard.press('Enter');
     }
-    await settlePromise;
+
+    await delay(2000);
+    await this.waitForPageSettled(page, 9000, { waitForLocation: true });
 
     const doneButton = await this.getVisibleHandle(page, ZIP_DONE_SELECTOR);
     if (doneButton) {
-      const doneSettlePromise = this.waitForPageSettled(page, 10000);
       await doneButton.click().catch(() => null);
-      await doneSettlePromise;
+      await this.waitForPageSettled(page, 7000, { waitForLocation: true });
     }
+
+    const afterDoneState = await this.getLocationConfirmationState(page);
+    if (afterDoneState.popoverOpen) {
+      const dismissedWithKeyboard = await this.dismissLocationPopoverWithKeyboard(page);
+      if (dismissedWithKeyboard) {
+        await this.waitForPageSettled(page, 5000, { waitForLocation: true });
+      }
+    }
+
     await this.confirmDeliveryLocation(page);
   }
 
@@ -731,101 +1115,96 @@ class AmazonFreshScraper extends BaseScraper {
           return null;
         });
 
-      await page.waitForSelector('body', { timeout: 10000 }).catch(() => null);
-      await this.waitForPageSettled(page, attempt === 1 ? 16000 : 22000);
-      await humanDelay(1200, 2200);
+      await this.waitForPageSettled(page, attempt === 1 ? 9000 : 14000, { waitForResults: true });
 
-      console.log(`[>] Amazon Fresh result selector wait attempt ${attempt}`);
       const selectorFound = await this.waitForProductResults(
         page,
-        attempt === 1 ? 14000 : 18000,
-        attempt === 1 ? 8000 : 12000
+        attempt === 1 ? 7000 : 11000,
+        attempt === 1 ? 4000 : 7000
       );
-      const diagnostics = await this.getStablePageDiagnostics(page, response, {
-        navigationError,
-        cookieCount: await getCookieCount(page)
-      });
-      const locationState = await this.getLocationConfirmationState(page);
 
-      let enrichedDiagnostics = {
-        ...diagnostics,
-        ...locationState,
-        attempt,
-        selectorFound,
-        blankPage: this.isBlankPageDiagnostics(diagnostics),
-        bouncedToStorefront: this.isAmazonFreshStorefrontUrl(diagnostics.finalUrl),
-        urlMatchesSearch: this.isAmazonFreshSearchUrl(diagnostics.finalUrl),
-        zipConfirmed: this.isLocationConfirmed(locationState)
-      };
-
-      this.logNavigationDiagnostics('Amazon Fresh search', enrichedDiagnostics);
-      const needsManualChallenge =
-        enrichedDiagnostics.blocked || enrichedDiagnostics.verification;
-      enrichedDiagnostics = await this.maybeHandleManualChallenge(
+      let diagnostics = await this.inspectPageState(
         page,
-        enrichedDiagnostics,
-        'Amazon Fresh search'
+        response,
+        { navigationError },
+        { attempt, selectorFound }
       );
-      const refreshedLocationState = await this.getLocationConfirmationState(page);
-      enrichedDiagnostics = {
-        ...enrichedDiagnostics,
-        ...refreshedLocationState,
-        attempt,
-        blankPage: this.isBlankPageDiagnostics(enrichedDiagnostics),
-        bouncedToStorefront: this.isAmazonFreshStorefrontUrl(enrichedDiagnostics.finalUrl),
-        urlMatchesSearch: this.isAmazonFreshSearchUrl(enrichedDiagnostics.finalUrl),
-        zipConfirmed: this.isLocationConfirmed(refreshedLocationState)
-      };
-      if (enrichedDiagnostics.zipConfirmed) {
-        this.recordConfirmedZip(enrichedDiagnostics);
-      }
+      this.logNavigationDiagnostics('Amazon Fresh search', diagnostics);
+
+      const needsManualChallenge = diagnostics.blocked || diagnostics.verification;
       if (needsManualChallenge) {
-        this.logNavigationDiagnostics('Amazon Fresh search after challenge', enrichedDiagnostics);
+        diagnostics = await this.maybeHandleManualChallenge(page, diagnostics, 'Amazon Fresh search');
+        const refreshedLocationState = await this.getLocationConfirmationState(page);
+        diagnostics = this.buildNavigationState(diagnostics, refreshedLocationState, {
+          attempt,
+          selectorFound: diagnostics.selectorFound || (await this.hasProductResults(page))
+        });
+        this.logNavigationDiagnostics('Amazon Fresh search after challenge', diagnostics);
       }
 
-      if (enrichedDiagnostics.blocked || enrichedDiagnostics.verification) {
+      if (diagnostics.zipConfirmed) {
+        this.markSessionReady(diagnostics);
+      }
+
+      if (diagnostics.blocked || diagnostics.verification) {
+        const failureState = await this.collectFailureState(
+          page,
+          response,
+          { navigationError },
+          { attempt, selectorFound }
+        );
         throw new Error(
-          `${this.getProviderSpecificBlockHint()} finalUrl=${enrichedDiagnostics.finalUrl} ` +
-            `title="${enrichedDiagnostics.title}" body="${enrichedDiagnostics.bodySnippet}" ` +
-            `html="${enrichedDiagnostics.htmlSnippet}"`
+          `${this.getProviderSpecificBlockHint()} finalUrl=${failureState.finalUrl} ` +
+            `title="${failureState.title}" body="${failureState.bodySnippet}" ` +
+            `html="${failureState.htmlSnippet}"`
         );
       }
 
-      if (enrichedDiagnostics.signInRequired) {
+      if (this.shouldTreatSignInAsFatal(diagnostics)) {
+        await this.invalidateSession('sign-in-required', { closePage: false });
         throw new Error(
           `Amazon Fresh appears to require sign-in or delivery eligibility for preferred ZIP ${this.zipCode}. ` +
-            `finalUrl=${enrichedDiagnostics.finalUrl} title="${enrichedDiagnostics.title}" ` +
-            `body="${enrichedDiagnostics.bodySnippet}"`
+            `finalUrl=${diagnostics.finalUrl} title="${diagnostics.title}" ` +
+            `body="${diagnostics.bodySnippet}"`
         );
       }
 
-      if (enrichedDiagnostics.selectorFound || enrichedDiagnostics.noResults) {
-        return { diagnostics: enrichedDiagnostics, searchUrl };
+      if (diagnostics.selectorFound || diagnostics.noResults) {
+        if (diagnostics.zipConfirmed) {
+          this.markSessionReady(diagnostics);
+        }
+        return { diagnostics, searchUrl };
       }
 
-      if (enrichedDiagnostics.status && enrichedDiagnostics.status >= 400) {
+      if (diagnostics.status && diagnostics.status >= 400) {
+        const failureState = await this.collectFailureState(
+          page,
+          response,
+          { navigationError },
+          { attempt, selectorFound }
+        );
         throw new Error(
-          `Amazon Fresh returned HTTP ${enrichedDiagnostics.status} for ${searchUrl}. ` +
-            `${this.getProviderSpecificBlockHint()} finalUrl=${enrichedDiagnostics.finalUrl} ` +
-            `title="${enrichedDiagnostics.title}" body="${enrichedDiagnostics.bodySnippet}" ` +
-            `html="${enrichedDiagnostics.htmlSnippet}"`
+          `Amazon Fresh returned HTTP ${failureState.status} for ${searchUrl}. ` +
+            `${this.getProviderSpecificBlockHint()} finalUrl=${failureState.finalUrl} ` +
+            `title="${failureState.title}" body="${failureState.bodySnippet}" ` +
+            `html="${failureState.htmlSnippet}"`
         );
       }
 
-      lastDiagnostics = enrichedDiagnostics;
-      const navigationTimedOut = String(enrichedDiagnostics.navigationError || '')
+      lastDiagnostics = diagnostics;
+      const navigationTimedOut = String(diagnostics.navigationError || '')
         .toLowerCase()
         .includes('timeout');
       const retryReason =
-        enrichedDiagnostics.executionContextUnstable
+        diagnostics.executionContextUnstable
           ? 'execution-context-unstable'
-          : enrichedDiagnostics.blankPage
+          : diagnostics.blankPage
             ? 'blank-page'
-            : enrichedDiagnostics.bouncedToStorefront && navigationTimedOut
-              ? 'storefront-bounce-after-timeout'
-              : enrichedDiagnostics.bouncedToStorefront && enrichedDiagnostics.zipConfirmed
-                ? 'storefront-bounce-with-valid-session'
-                : navigationTimedOut && enrichedDiagnostics.urlMatchesSearch
+            : diagnostics.bouncedToStorefront
+              ? 'storefront-bounce'
+              : !diagnostics.zipConfirmed
+                ? 'zip-confirmation-lost'
+                : navigationTimedOut && diagnostics.urlMatchesSearch
                   ? 'slow-search-render'
                   : null;
 
@@ -833,17 +1212,26 @@ class AmazonFreshScraper extends BaseScraper {
         break;
       }
 
-      this.logNavigationDiagnostics('Amazon Fresh search retrying', {
-        ...enrichedDiagnostics,
-        retrying: true,
-        retryReason
-      });
+      const retryDiagnostics = await this.collectFailureState(
+        page,
+        response,
+        { navigationError },
+        {
+          attempt,
+          selectorFound,
+          retrying: true,
+          retryReason
+        }
+      );
+      this.logNavigationDiagnostics('Amazon Fresh search retrying', retryDiagnostics);
+      lastDiagnostics = retryDiagnostics;
 
-      if (enrichedDiagnostics.bouncedToStorefront && !enrichedDiagnostics.zipConfirmed) {
-        console.log('[!] Amazon Fresh search bounce lost ZIP confirmation; re-establishing location');
-        await this.setDeliveryLocation(page);
+      if (retryDiagnostics.bouncedToStorefront || !retryDiagnostics.zipConfirmed) {
+        console.log('[!] Amazon Fresh session needs recovery before retrying search');
+        await this.invalidateSession(retryReason, { closePage: false });
+        await this.prepareSession({ force: true });
       } else {
-        await humanDelay(900, 1800);
+        await humanDelay(400, 900);
       }
     }
 
@@ -858,112 +1246,145 @@ class AmazonFreshScraper extends BaseScraper {
     );
   }
 
-  async search(query, options = {}) {
-    const { limit = 30 } = options;
+  async extractProducts(page, limit = 30) {
     const seenUrls = new Set();
 
-    let page;
-    try {
-      page = await this.getPage();
-      console.log('amazon fresh scraper config', {
-        provider: this.provider,
-        preferredZipCode: this.zipCode,
-        confirmedZipCode: this.confirmedZipCode,
-        acceptableZipPrefixes: this.acceptableZipPrefixes,
-        acceptableZipCodes: this.acceptableZipCodes,
-        hasAuth: Boolean(config.brightdata.auth),
-        browserWSEndpoint: this.browserWSEndpoint || config.brightdata.browserWSEndpoint
-          ? 'configured'
-          : 'missing'
-      });
+    const pageRaw = await page.evaluate((productSelector) => {
+      const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
+      const parsePrice = (text) => {
+        const match = (text || '').match(/\$([\d,]+(?:\.\d{2})?)/);
+        return match ? parseFloat(match[1].replace(/,/g, '')) : null;
+      };
 
-      await this.establishFreshSession(page);
+      const cards = [...document.querySelectorAll(productSelector)];
+      return cards.map((card) => {
+        const asin = card.getAttribute('data-asin') || 'N/A';
+        const link =
+          card.querySelector('a[href*="/dp/"]') || card.querySelector('a[href*="/gp/product/"]');
+        const titleEl =
+          card.querySelector('h2 span') ||
+          card.querySelector('[data-cy="title-recipe-title"]') ||
+          card.querySelector('.a-size-base-plus');
+        const image = card.querySelector('img.s-image, img')?.src || null;
+        const priceText =
+          clean(card.querySelector('.a-price .a-offscreen')?.textContent) ||
+          clean(card.querySelector('[data-a-color="base"] .a-offscreen')?.textContent) ||
+          null;
+        const ratingLabel =
+          card.querySelector('[aria-label*="out of 5 stars"]')?.getAttribute('aria-label') ||
+          card.querySelector('.a-icon-alt')?.textContent ||
+          '';
+        const reviewsText =
+          card.querySelector('a[href*="#customerReviews"] span')?.textContent ||
+          card.querySelector('[aria-label*="ratings"]')?.getAttribute('aria-label') ||
+          '';
+        const ratingMatch = ratingLabel.match(/([\d.]+)\s*out of\s*5/i);
+        const reviewsMatch = reviewsText.match(/([\d,]+)/);
+
+        return {
+          name: clean(titleEl?.textContent || link?.textContent),
+          price: priceText,
+          extractedPrice: parsePrice(priceText),
+          rating: ratingMatch ? parseFloat(ratingMatch[1]) : null,
+          reviews: reviewsMatch ? parseInt(reviewsMatch[1].replace(/,/g, ''), 10) : null,
+          url: link ? new URL(link.getAttribute('href'), window.location.origin).href.split('?')[0] : null,
+          thumbnail: image,
+          productId: asin
+        };
+      });
+    }, PRODUCT_SELECTOR);
+
+    return pageRaw
+      .filter((product) => product.name && product.name !== 'N/A' && product.url)
+      .filter((product) => {
+        if (seenUrls.has(product.url)) {
+          return false;
+        }
+        seenUrls.add(product.url);
+        return true;
+      })
+      .slice(0, limit)
+      .map((product, index) => ({
+        position: index + 1,
+        title: product.name,
+        product_id: product.productId,
+        product_link: product.url,
+        source: 'Amazon Fresh',
+        source_icon: 'https://www.amazon.com/favicon.ico',
+        price: product.price,
+        extracted_price: product.extractedPrice,
+        rating: product.rating,
+        reviews: product.reviews,
+        extensions: [`zip:${this.confirmedZipCode || this.sessionZip || this.zipCode}`],
+        thumbnail: product.thumbnail,
+        primary_offer:
+          product.extractedPrice != null ? { offer_price: product.extractedPrice } : null,
+        seller_name: 'Amazon Fresh'
+      }));
+  }
+
+  async search(query, options = {}) {
+    const { limit = 30, skipConfigLog = false } = options;
+
+    try {
+      if (!skipConfigLog) {
+        this.logSearchConfig();
+      }
+
+      await this.prepareSession();
+      const page = await this.getSessionPage();
       await this.navigateToSearch(page, query);
 
-      const pageRaw = await page.evaluate(() => {
-        const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
-        const parsePrice = (text) => {
-          const match = (text || '').match(/\$([\d,]+(?:\.\d{2})?)/);
-          return match ? parseFloat(match[1].replace(/,/g, '')) : null;
-        };
-
-        const cards = [...document.querySelectorAll('[data-component-type="s-search-result"][data-asin]')];
-        return cards.map((card) => {
-          const asin = card.getAttribute('data-asin') || 'N/A';
-          const link =
-            card.querySelector('a[href*="/dp/"]') ||
-            card.querySelector('a[href*="/gp/product/"]');
-          const titleEl =
-            card.querySelector('h2 span') ||
-            card.querySelector('[data-cy="title-recipe-title"]') ||
-            card.querySelector('.a-size-base-plus');
-          const image = card.querySelector('img.s-image, img')?.src || null;
-          const priceText =
-            clean(card.querySelector('.a-price .a-offscreen')?.textContent) ||
-            clean(card.querySelector('[data-a-color="base"] .a-offscreen')?.textContent) ||
-            null;
-          const ratingLabel =
-            card.querySelector('[aria-label*="out of 5 stars"]')?.getAttribute('aria-label') ||
-            card.querySelector('.a-icon-alt')?.textContent ||
-            '';
-          const reviewsText =
-            card.querySelector('a[href*="#customerReviews"] span')?.textContent ||
-            card.querySelector('[aria-label*="ratings"]')?.getAttribute('aria-label') ||
-            '';
-          const ratingMatch = ratingLabel.match(/([\d.]+)\s*out of\s*5/i);
-          const reviewsMatch = reviewsText.match(/([\d,]+)/);
-
-          return {
-            name: clean(titleEl?.textContent || link?.textContent),
-            price: priceText,
-            extractedPrice: parsePrice(priceText),
-            rating: ratingMatch ? parseFloat(ratingMatch[1]) : null,
-            reviews: reviewsMatch ? parseInt(reviewsMatch[1].replace(/,/g, ''), 10) : null,
-            url: link ? new URL(link.getAttribute('href'), window.location.origin).href.split('?')[0] : null,
-            thumbnail: image,
-            productId: asin
-          };
-        });
-      });
-
-      const products = pageRaw
-        .filter((product) => product.name && product.name !== 'N/A' && product.url)
-        .filter((product) => {
-          if (seenUrls.has(product.url)) {
-            return false;
-          }
-          seenUrls.add(product.url);
-          return true;
-        })
-        .slice(0, limit)
-        .map((product, index) => ({
-          position: index + 1,
-          title: product.name,
-          product_id: product.productId,
-          product_link: product.url,
-          source: 'Amazon Fresh',
-          source_icon: 'https://www.amazon.com/favicon.ico',
-          price: product.price,
-          extracted_price: product.extractedPrice,
-          rating: product.rating,
-          reviews: product.reviews,
-          extensions: [`zip:${this.confirmedZipCode || this.zipCode}`],
-          thumbnail: product.thumbnail,
-          primary_offer:
-            product.extractedPrice != null ? { offer_price: product.extractedPrice } : null,
-          seller_name: 'Amazon Fresh'
-        }));
-
+      const products = await this.extractProducts(page, limit);
       console.log(`[OK] Done - ${products.length} total Amazon Fresh products`);
       return products;
     } catch (error) {
       await this.logBrightDataSessionDiagnostics('Amazon Fresh search Bright Data session');
+      await this.invalidateSession(`search-failed:${query}`, { closePage: true, log: false });
       throw new Error(`Amazon Fresh search failed for "${query}": ${error.message}`);
-    } finally {
-      if (page) {
-        await page.close();
+    }
+  }
+
+  async searchBatch(queries, options = {}) {
+    const { limit = 30, continueOnError = false } = options;
+    const normalizedQueries = Array.isArray(queries)
+      ? queries.map((query) => String(query || '').trim()).filter(Boolean)
+      : [];
+
+    if (!normalizedQueries.length) {
+      return [];
+    }
+
+    this.logSearchConfig();
+
+    try {
+      await this.prepareSession();
+    } catch (error) {
+      if (!continueOnError) {
+        throw error;
+      }
+
+      return normalizedQueries.map((query) => ({
+        query,
+        products: [],
+        error: error.message
+      }));
+    }
+
+    const results = [];
+    for (const query of normalizedQueries) {
+      try {
+        const products = await this.search(query, { limit, skipConfigLog: true });
+        results.push({ query, products, error: null });
+      } catch (error) {
+        results.push({ query, products: [], error: error.message });
+        if (!continueOnError) {
+          throw error;
+        }
       }
     }
+
+    return results;
   }
 
   async getProductDetails(productId) {
@@ -976,11 +1397,9 @@ class AmazonFreshScraper extends BaseScraper {
         waitUntil: 'domcontentloaded',
         timeout: this.timeout
       });
-      await page.waitForSelector('body', { timeout: 10000 }).catch(() => null);
+      await this.waitForPageSettled(page, 9000);
 
-      const diagnostics = await this.getPageDiagnostics(page, response, {
-        cookieCount: await getCookieCount(page)
-      });
+      const diagnostics = await this.collectFailureState(page, response);
       this.logNavigationDiagnostics('Amazon Fresh product', diagnostics);
 
       if (diagnostics.status && diagnostics.status >= 400) {
@@ -1006,7 +1425,7 @@ class AmazonFreshScraper extends BaseScraper {
       throw new Error(`Failed to get Amazon Fresh product details for ${productId}: ${error.message}`);
     } finally {
       if (page) {
-        await page.close();
+        await page.close().catch(() => null);
       }
     }
   }

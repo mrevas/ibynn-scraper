@@ -152,6 +152,37 @@ async function searchAmazonFresh(query, limit = 10) {
 module.exports = { searchAmazonFresh };
 ```
 
+For repeated Amazon Fresh queries in one process, reuse the same scraper
+instance and prepared session:
+
+```js
+async function searchAmazonFreshBatch(queries, limit = 10) {
+  const scraper = getScraper(
+    'amazonfresh',
+    buildStoreScraperOptions('amazonfresh', {
+      provider: process.env.TARGET_SCRAPER_PROVIDER || 'brightdata',
+      zipCode: process.env.AMAZON_FRESH_ZIP || '11435'
+    })
+  );
+
+  try {
+    await scraper.prepareSession();
+    return await scraper.searchBatch(queries, {
+      limit,
+      continueOnError: true
+    });
+  } finally {
+    await scraper.close();
+  }
+}
+```
+
+Amazon Fresh public methods for session reuse:
+
+- `prepareSession()`
+- `resetSession()`
+- `searchBatch(queries, { limit, continueOnError })`
+
 Example Express route:
 
 ```js
@@ -201,6 +232,7 @@ Optional:
 BRIGHTDATA_BROWSER_WS=wss://username:password@brd.superproxy.io:9222
 BRIGHTDATA_API_KEY=your_brightdata_api_key
 TARGET_SCRAPER_TIMEOUT_MS=60000
+AMAZON_FRESH_CATEGORY_SEARCHES_FILE=path/to/amazon-fresh-category-searches.txt
 ```
 
 `BRIGHTDATA_BROWSER_WS` overrides the endpoint derived from `BRIGHTDATA_AUTH`.

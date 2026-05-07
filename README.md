@@ -96,6 +96,16 @@ Amazon Fresh CLI:
 npm run amazonfresh:scrape -- "milk" 10
 ```
 
+Amazon Fresh batch CLI with session reuse:
+```bash
+node src/amazon-fresh-cli.js --queries-file=queries.txt 10
+```
+
+Amazon Fresh all-categories run via env-configured query list:
+```bash
+AMAZON_FRESH_CATEGORY_SEARCHES_FILE=path/to/amazon-fresh-category-searches.txt node src/amazon-fresh-cli.js 25
+```
+
 Amazon Fresh submits preferred ZIP `11435` by default, then accepts any configured Queens ZIP match.
 Override the preferred ZIP with:
 ```bash
@@ -210,6 +220,28 @@ async function searchCostco(query, limit = 10) {
 
   try {
     return await scraper.search(query, { limit });
+  } finally {
+    await scraper.close();
+  }
+}
+```
+
+Amazon Fresh batch API example:
+```js
+const { getScraper, buildStoreScraperOptions } = require('ibynn-target-scraper');
+
+async function searchAmazonFreshBatch(queries, limit = 10) {
+  const scraper = getScraper(
+    'amazonfresh',
+    buildStoreScraperOptions('amazonfresh', {
+      provider: process.env.TARGET_SCRAPER_PROVIDER || 'brightdata',
+      zipCode: process.env.AMAZON_FRESH_ZIP || '11435'
+    })
+  );
+
+  try {
+    await scraper.prepareSession();
+    return await scraper.searchBatch(queries, { limit, continueOnError: true });
   } finally {
     await scraper.close();
   }
