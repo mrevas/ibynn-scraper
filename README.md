@@ -132,6 +132,11 @@ Costco CLI:
 npm run costco:scrape -- "milk" 10
 ```
 
+Costco batch CLI with one query per line:
+```bash
+node src/costco-cli.js --queries-file=queries.txt 25 --zip=11435
+```
+
 Costco uses the Instacart storefront and ZIP `11435` by default. Override it with:
 ```bash
 node src/costco-cli.js "milk" 10 --zip=11435

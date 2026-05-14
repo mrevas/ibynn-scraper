@@ -49,6 +49,7 @@ class CostcoScraper extends BaseScraper {
       typeof options.userAgent === 'string' ? options.userAgent : config.userAgent;
     this.manualChallenge = options.manualChallenge;
     this.zipCode = String(options.zipCode || config.costco.zipCode || '11435').trim();
+    this.hasLoggedSearchConfig = false;
   }
 
   getStepTimeout(maxTimeout = 20000) {
@@ -123,7 +124,23 @@ class CostcoScraper extends BaseScraper {
       }
     } finally {
       this.browser = null;
+      this.hasLoggedSearchConfig = false;
     }
+  }
+
+  logSearchConfig() {
+    if (this.hasLoggedSearchConfig) {
+      return;
+    }
+
+    console.log('costco scraper config', {
+      provider: this.provider,
+      zipCode: this.zipCode,
+      hasAuth: Boolean(config.brightdata.auth),
+      browserWSEndpoint:
+        this.browserWSEndpoint || config.brightdata.browserWSEndpoint ? 'configured' : 'missing'
+    });
+    this.hasLoggedSearchConfig = true;
   }
 
   async getPage() {
@@ -518,19 +535,15 @@ class CostcoScraper extends BaseScraper {
   }
 
   async search(query, options = {}) {
-    const { limit = 30 } = options;
+    const { limit = 30, skipConfigLog = false } = options;
     const seenUrls = new Set();
 
     let page;
     try {
       page = await this.getPage();
-      console.log('costco scraper config', {
-        provider: this.provider,
-        zipCode: this.zipCode,
-        hasAuth: Boolean(config.brightdata.auth),
-        browserWSEndpoint:
-          this.browserWSEndpoint || config.brightdata.browserWSEndpoint ? 'configured' : 'missing'
-      });
+      if (!skipConfigLog) {
+        this.logSearchConfig();
+      }
 
       let diagnostics;
       try {
@@ -644,6 +657,34 @@ class CostcoScraper extends BaseScraper {
         await page.close();
       }
     }
+  }
+
+  async searchBatch(queries, options = {}) {
+    const { limit = 30, continueOnError = false } = options;
+    const normalizedQueries = Array.isArray(queries)
+      ? queries.map((query) => String(query || '').trim()).filter(Boolean)
+      : [];
+
+    if (!normalizedQueries.length) {
+      return [];
+    }
+
+    this.logSearchConfig();
+
+    const results = [];
+    for (const query of normalizedQueries) {
+      try {
+        const products = await this.search(query, { limit, skipConfigLog: true });
+        results.push({ query, products, error: null });
+      } catch (error) {
+        results.push({ query, products: [], error: error.message });
+        if (!continueOnError) {
+          throw error;
+        }
+      }
+    }
+
+    return results;
   }
 
   async getProductDetails(productId) {

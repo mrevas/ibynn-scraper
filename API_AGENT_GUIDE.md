@@ -233,6 +233,7 @@ BRIGHTDATA_BROWSER_WS=wss://username:password@brd.superproxy.io:9222
 BRIGHTDATA_API_KEY=your_brightdata_api_key
 TARGET_SCRAPER_TIMEOUT_MS=60000
 AMAZON_FRESH_CATEGORY_SEARCHES_FILE=path/to/amazon-fresh-category-searches.txt
+COSTCO_CATEGORY_SEARCHES_FILE=path/to/costco-category-searches.txt
 ```
 
 `BRIGHTDATA_BROWSER_WS` overrides the endpoint derived from `BRIGHTDATA_AUTH`.
