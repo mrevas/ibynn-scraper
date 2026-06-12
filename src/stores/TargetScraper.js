@@ -5,6 +5,10 @@ const { createBrowser, getBrowserProvider } = require('../browser');
 const SEARCH_LINK_SELECTOR = 'a[href*="/p/"]';
 const PRODUCT_TITLE_SELECTOR = '[data-test="@web/ProductTitle"]';
 
+function isAbsoluteUrl(value) {
+  return /^https?:\/\//i.test(String(value || '').trim());
+}
+
 /**
  * Target.com Scraper
  * Extends BaseScraper to provide Target-specific functionality
@@ -288,7 +292,9 @@ class TargetScraper extends BaseScraper {
     try {
       page = await this.getPage();
 
-      const url = `https://www.target.com/p/${productId}`;
+      const url = isAbsoluteUrl(productId)
+        ? String(productId).trim()
+        : `https://www.target.com/p/${productId}`;
       console.log(`[>] Fetching product details for ID: ${productId}`);
 
       await this.navigateToProduct(page, url);
