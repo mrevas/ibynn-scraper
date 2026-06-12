@@ -1411,13 +1411,40 @@ class AmazonFreshScraper extends BaseScraper {
       }
 
       return page.evaluate(() => {
-        const text = (selector) => document.querySelector(selector)?.textContent?.trim() || 'N/A';
+        const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
+        const text = (selectors) => {
+          for (const selector of selectors) {
+            const value = normalize(document.querySelector(selector)?.textContent);
+            if (value) {
+              return value;
+            }
+          }
+
+          return null;
+        };
+        const bodyText = normalize(document.body?.innerText);
         return {
-          title: text('#productTitle, h1'),
-          price: text('.a-price .a-offscreen, #corePrice_feature_div .a-offscreen'),
-          description: text('#feature-bullets, #productDescription'),
-          rating: text('.a-icon-alt, [data-hook="rating-out-of-text"]'),
-          reviews: text('#acrCustomerReviewText')
+          title: text(['#productTitle', 'h1']),
+          price: text(['.a-price .a-offscreen', '#corePrice_feature_div .a-offscreen']),
+          old_price: text([
+            '.basisPrice .a-offscreen',
+            '.a-price.a-text-price .a-offscreen',
+          ]),
+          description: text(['#feature-bullets', '#productDescription']),
+          rating: text(['.a-icon-alt', '[data-hook="rating-out-of-text"]']),
+          reviews: text(['#acrCustomerReviewText']),
+          availability:
+            text([
+              '#availability',
+              '[data-cy="delivery-block"]',
+            ]) || bodyText.match(/(currently unavailable|out of stock|in stock)/i)?.[0] || null,
+          price_per_unit: text([
+            '#alm-price-per-unit',
+            '.pricePerUnit',
+          ]),
+          thumbnail:
+            document.querySelector('#landingImage, #imgTagWrapperId img, img')?.src || null,
+          product_page_url: window.location.href,
         };
       });
     } catch (error) {

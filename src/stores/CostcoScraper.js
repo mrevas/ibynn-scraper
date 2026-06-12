@@ -718,14 +718,34 @@ class CostcoScraper extends BaseScraper {
         const description =
           normalize(detailsHeading?.parentElement?.innerText) ||
           normalize(detailsHeading?.nextElementSibling?.innerText) ||
-          'N/A';
+          null;
+        const bodyText = normalize(document.body?.innerText);
+        const availability =
+          getText([
+            '[data-testid="product-availability"]',
+            '[aria-live="polite"]',
+          ]) ||
+          bodyText.match(/(out of stock|sold out|in stock|available)/i)?.[0] ||
+          null;
 
         return {
           title: getText(['h1']),
-          price: priceText === 'N/A' ? 'N/A' : priceText.replace(/^Current price:\s*/i, ''),
+          price: priceText === 'N/A' ? null : priceText.replace(/^Current price:\s*/i, ''),
+          old_price: getText([
+            '[data-testid="regular-price"]',
+            '[data-testid="compare-at-price"]',
+          ]),
           description,
-          rating: 'N/A',
-          reviews: 'N/A'
+          rating: null,
+          reviews: null,
+          availability,
+          price_per_unit: getText([
+            '[data-testid="unit-price"]',
+          ]),
+          thumbnail:
+            document.querySelector('img[alt], [data-testid="product-image"] img, img')?.src ||
+            null,
+          product_page_url: window.location.href,
         };
       });
 

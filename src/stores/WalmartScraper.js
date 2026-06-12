@@ -489,13 +489,45 @@ class WalmartScraper extends BaseScraper {
       }
 
       return page.evaluate(() => {
-        const text = (selector) => document.querySelector(selector)?.textContent?.trim() || 'N/A';
+        const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
+        const text = (selectors) => {
+          for (const selector of selectors) {
+            const value = normalize(document.querySelector(selector)?.textContent);
+            if (value) {
+              return value;
+            }
+          }
+
+          return null;
+        };
+        const bodyText = normalize(document.body?.innerText);
         return {
-          title: text('h1, [data-automation-id="product-title"]'),
-          price: text('[data-automation-id="product-price"], [itemprop="price"]'),
-          description: text('[data-testid="product-description"], [data-automation-id="product-description"]'),
-          rating: text('[data-testid*="rating"], [aria-label*="out of 5"]'),
-          reviews: text('[data-testid*="review"], [aria-label*="review"]')
+          title: text(['h1', '[data-automation-id="product-title"]']),
+          price: text(['[data-automation-id="product-price"]', '[itemprop="price"]']),
+          old_price: text([
+            '[data-testid="strikethrough-price"]',
+            '[data-automation-id="product-price-was"]',
+          ]),
+          description: text([
+            '[data-testid="product-description"]',
+            '[data-automation-id="product-description"]',
+          ]),
+          rating: text(['[data-testid*="rating"]', '[aria-label*="out of 5"]']),
+          reviews: text(['[data-testid*="review"]', '[aria-label*="review"]']),
+          availability:
+            text([
+              '[data-testid="fulfillment-section"]',
+              '[data-automation-id="fulfillment-summary"]',
+            ]) || bodyText.match(/(out of stock|sold out|in stock|available)/i)?.[0] || null,
+          price_per_unit: text([
+            '[data-testid="unit-price"]',
+            '[data-automation-id="unit-price"]',
+          ]),
+          thumbnail:
+            document.querySelector(
+              '[data-testid="hero-image"] img, [data-testid="media-image"] img, img'
+            )?.src || null,
+          product_page_url: window.location.href,
         };
       });
     } catch (error) {

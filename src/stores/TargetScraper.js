@@ -294,13 +294,54 @@ class TargetScraper extends BaseScraper {
       await this.navigateToProduct(page, url);
 
       const details = await page.evaluate(() => {
-        const title = document.querySelector('[data-test="@web/ProductTitle"]')?.textContent?.trim() || 'N/A';
-        const price = document.querySelector('[data-test="@web/ProductPrice"]')?.textContent?.trim() || 'N/A';
-        const description = document.querySelector('[data-test="@web/ProductDescription"]')?.textContent?.trim() || 'N/A';
-        const rating = document.querySelector('[data-test="@web/ProductRating"]')?.textContent?.trim() || 'N/A';
-        const reviews = document.querySelector('[data-test="@web/ProductReviews"]')?.textContent?.trim() || 'N/A';
+        const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
+        const readText = (selectors) => {
+          for (const selector of selectors) {
+            const value = normalize(document.querySelector(selector)?.textContent);
+            if (value) {
+              return value;
+            }
+          }
 
-        return { title, price, description, rating, reviews };
+          return null;
+        };
+        const bodyText = normalize(document.body?.innerText);
+        const thumbnail =
+          document.querySelector(
+            '[data-test="@web/ProductImages"] img, [data-test="media-viewer"] img, img'
+          )?.src || null;
+
+        return {
+          title: readText(['[data-test="@web/ProductTitle"]', 'h1']),
+          price: readText(['[data-test="@web/ProductPrice"]', '[data-test="product-price"]']),
+          old_price: readText([
+            '[data-test="product-regular-price"]',
+            '[data-test="price-compare-at"]',
+          ]),
+          description: readText([
+            '[data-test="@web/ProductDescription"]',
+            '[data-test="item-details-description"]',
+          ]),
+          rating: readText([
+            '[data-test="@web/ProductRating"]',
+            '[aria-label*="out of 5"]',
+          ]),
+          reviews: readText([
+            '[data-test="@web/ProductReviews"]',
+            '[data-test="ratingCount"]',
+          ]),
+          availability: readText([
+            '[data-test="availability-text"]',
+            '[data-test="fulfillment-summary"]',
+            '[data-test="@web/FulfillmentText"]',
+          ]) || bodyText.match(/(out of stock|sold out|in stock|available for shipping)/i)?.[0] || null,
+          price_per_unit: readText([
+            '[data-test="price-per-unit"]',
+            '[data-test="@web/PricePerUnit"]',
+          ]),
+          thumbnail,
+          product_page_url: window.location.href,
+        };
       });
 
       console.log('[OK] Product details retrieved');
