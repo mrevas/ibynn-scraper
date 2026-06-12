@@ -3,7 +3,7 @@ const config = require('../../config');
 const { createBrowser, getBrowserProvider } = require('../browser');
 
 const SEARCH_LINK_SELECTOR = 'a[href*="/p/"]';
-const PRODUCT_TITLE_SELECTOR = '[data-test="@web/ProductTitle"]';
+const PRODUCT_TITLE_SELECTOR = '[data-test="@web/ProductTitle"], h1';
 
 function isAbsoluteUrl(value) {
   return /^https?:\/\//i.test(String(value || '').trim());
@@ -127,7 +127,32 @@ class TargetScraper extends BaseScraper {
       throw new Error(`Target returned HTTP ${response.status()} for ${url}`);
     }
 
-    await page.waitForSelector(PRODUCT_TITLE_SELECTOR, { timeout: this.timeout });
+    try {
+      await page.waitForSelector(PRODUCT_TITLE_SELECTOR, { timeout: this.timeout });
+      return;
+    } catch (error) {
+      const pageState = await page.evaluate(() => {
+        const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
+        const bodyText = normalize(document.body?.innerText);
+        return {
+          title: document.title,
+          productTitle:
+            normalize(document.querySelector('h1')?.textContent) ||
+            normalize(document.querySelector('[data-test="@web/ProductTitle"]')?.textContent),
+          hasAddToCart:
+            Boolean(document.querySelector('[data-test="addToCartButton"], button[id*="addToCartButtonOrTextIdFor"]')),
+          bodySnippet: bodyText.slice(0, 300)
+        };
+      });
+
+      if (pageState.productTitle || pageState.hasAddToCart) {
+        return;
+      }
+
+      throw new Error(
+        `Waiting for selector \`${PRODUCT_TITLE_SELECTOR}\` failed (title: ${pageState.title || 'unknown'} body="${pageState.bodySnippet}")`
+      );
+    }
   }
 
   /**
