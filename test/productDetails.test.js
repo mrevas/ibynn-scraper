@@ -50,3 +50,23 @@ test('normalizeProductDetails keeps missing optional fields undefined', () => {
   assert.equal(details.out_of_stock, undefined);
   assert.equal(details.quantity, undefined);
 });
+
+test('normalizeProductDetails preserves location validation metadata for store-gated PDPs', () => {
+  const details = normalizeProductDetails(
+    'costco',
+    {
+      title: 'Kirkland Organic Eggs',
+      price: '$7.99',
+      availability: 'Out of stock',
+      location_valid: true,
+      confirmed_zip_code: '11435',
+    },
+    { identifier: '12345678' }
+  );
+
+  assert.equal(details.identifier, '12345678');
+  assert.equal(details.location_valid, true);
+  assert.equal(details.confirmed_zip_code, '11435');
+  assert.equal(details.out_of_stock, true);
+  assert.equal(details.quantity, 0);
+});

@@ -746,8 +746,14 @@ class CostcoScraper extends BaseScraper {
             document.querySelector('img[alt], [data-testid="product-image"] img, img')?.src ||
             null,
           product_page_url: window.location.href,
+          location_valid: true,
+          confirmed_zip_code: null,
         };
-      });
+      }).then((details) => ({
+        ...details,
+        location_valid: true,
+        confirmed_zip_code: this.zipCode || null,
+      }));
 
       console.log('[OK] Costco product details retrieved');
       return details;

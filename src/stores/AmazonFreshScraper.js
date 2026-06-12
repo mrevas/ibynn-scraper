@@ -1390,7 +1390,8 @@ class AmazonFreshScraper extends BaseScraper {
   async getProductDetails(productId) {
     let page;
     try {
-      page = await this.getPage();
+      await this.prepareSession();
+      page = await this.getSessionPage();
       const url = `https://www.amazon.com/dp/${productId}`;
       console.log(`[>] Fetching Amazon Fresh product details for ID: ${productId}`);
       const response = await page.goto(url, {
@@ -1409,6 +1410,17 @@ class AmazonFreshScraper extends BaseScraper {
       if (diagnostics.blocked || diagnostics.verification) {
         throw new Error(`${this.getProviderSpecificBlockHint()} Product navigation was blocked.`);
       }
+
+      if (!diagnostics.zipConfirmed) {
+        await this.invalidateSession('product-zip-confirmation-lost', { closePage: true, log: false });
+        throw new Error(
+          `Amazon Fresh product details lost location confirmation for preferred ZIP ${this.zipCode}. ` +
+            `finalUrl=${diagnostics.finalUrl} acceptedZip=${diagnostics.acceptedZipCode || 'none'} ` +
+            `confirmedZip=${diagnostics.confirmedZipCode || 'none'}`
+        );
+      }
+
+      const confirmedZip = this.markSessionReady(diagnostics);
 
       return page.evaluate(() => {
         const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
@@ -1445,13 +1457,19 @@ class AmazonFreshScraper extends BaseScraper {
           thumbnail:
             document.querySelector('#landingImage, #imgTagWrapperId img, img')?.src || null,
           product_page_url: window.location.href,
+          location_valid: true,
+          confirmed_zip_code: null,
         };
-      });
+      }).then((details) => ({
+        ...details,
+        location_valid: true,
+        confirmed_zip_code: confirmedZip || diagnostics.acceptedZipCode || diagnostics.confirmedZipCode || null,
+      }));
     } catch (error) {
       await this.logBrightDataSessionDiagnostics('Amazon Fresh product Bright Data session');
       throw new Error(`Failed to get Amazon Fresh product details for ${productId}: ${error.message}`);
     } finally {
-      if (page) {
+      if (page && page !== this.sessionPage) {
         await page.close().catch(() => null);
       }
     }

@@ -177,11 +177,17 @@ function normalizeProductDetails(storeName, rawDetails = {}, fallback = {}) {
     ),
     out_of_stock: outOfStock,
     quantity,
+    availability,
     rating: parseRating(rawDetails.rating),
     reviews: parseReviews(rawDetails.reviews),
-    availability,
     thumbnail: thumbnail || undefined,
     product_page_url: productPageUrl || undefined,
+    location_valid:
+      typeof rawDetails.location_valid === 'boolean'
+        ? rawDetails.location_valid
+        : undefined,
+    confirmed_zip_code:
+      normalizeText(rawDetails.confirmed_zip_code ?? rawDetails.confirmedZipCode) || undefined,
     raw: { ...rawDetails },
   };
 
